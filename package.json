@@ -4,9 +4,6 @@
   "description": "Telegram bot for collecting information about renovation projects",
   "main": "api/webhook.js",
   "dependencies": {
-    "dotenv": "^16.3.1",
-    "telegraf": "^4.15.0",
-    "google-spreadsheet": "^4.1.0",
-    "googleapis": "^126.0.1"
+    "dotenv": "^16.3.1"
   }
 }
