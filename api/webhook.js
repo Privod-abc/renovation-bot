@@ -1,4 +1,6 @@
-const https = require('https');
+import { GoogleSpreadsheet } from 'google-spreadsheet';
+import { JWT } from 'google-auth-library';
+import https from 'https';
 
 // Store user sessions in memory (for production use database)
 const userSessions = {};
@@ -13,6 +15,19 @@ const questions = [
   "🧱 What materials were used? (Include names, colors, manufacturers if possible)",
   "✨ Were there any interesting features or smart solutions implemented? (e.g. round lighting, hidden drawers, custom panels)",
   "📂 Please paste the Google Drive folder link (with subfolders: before / after / 3D / drawings)"
+];
+
+// Column headers for Google Sheets
+const COLUMN_HEADERS = [
+  'Date',
+  'Client Name',
+  'Room Type',
+  'Location',
+  'Goal',
+  'Work Done',
+  'Materials',
+  'Features',
+  'Drive Link'
 ];
 
 function sendMessage(chatId, text, options = {}) {
@@ -89,6 +104,85 @@ function makeApiCall(method, params = {}) {
   });
 }
 
+async function initializeGoogleSheets() {
+  try {
+    // Parse service account credentials from environment variables
+    const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    
+    // Create JWT client for authentication
+    const serviceAccountAuth = new JWT({
+      email: serviceAccountKey.client_email,
+      key: serviceAccountKey.private_key,
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+      ],
+    });
+
+    // Initialize document
+    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
+    await doc.loadInfo();
+    
+    console.log(`Connected to Google Sheet: ${doc.title}`);
+    
+    // Get first sheet or create new one if it doesn't exist
+    let sheet = doc.sheetsByIndex[0];
+    if (!sheet) {
+      sheet = await doc.addSheet({ title: 'Renovation Projects' });
+      console.log('Created new sheet: Renovation Projects');
+    }
+    
+    // Check if column headers are set
+    await sheet.loadHeaderRow();
+    
+    if (!sheet.headerValues || sheet.headerValues.length === 0) {
+      // If table is empty, add headers
+      await sheet.setHeaderRow(COLUMN_HEADERS);
+      console.log('Added headers to Google Sheet');
+    }
+    
+    return sheet;
+  } catch (error) {
+    console.error('Error initializing Google Sheets:', error);
+    throw error;
+  }
+}
+
+async function addRowToSheet(answers) {
+  try {
+    console.log('Attempting to add row to Google Sheets...');
+    const sheet = await initializeGoogleSheets();
+    
+    // Create new row with today's date and project data
+    const newRow = {
+      'Date': new Date().toLocaleDateString('en-US'),
+      'Client Name': answers[0] || 'Not specified',
+      'Room Type': answers[1] || 'Not specified',
+      'Location': answers[2] || 'Not specified',
+      'Goal': answers[3] || 'Not specified',
+      'Work Done': answers[4] || 'Not specified',
+      'Materials': answers[5] || 'Not specified',
+      'Features': answers[6] || 'Not specified',
+      'Drive Link': answers[7] || 'Not specified'
+    };
+    
+    console.log('Adding row:', newRow);
+    
+    // Add row to sheet
+    await sheet.addRow(newRow);
+    
+    console.log('Row added to Google Sheets successfully');
+    return true;
+  } catch (error) {
+    console.error('Error adding row to sheet:', error);
+    console.error('Error details:', error.message);
+    throw error;
+  }
+}
+
+function validateDriveLink(link) {
+  return link.includes('drive.google.com') || link.includes('docs.google.com');
+}
+
 async function setupBotCommands() {
   try {
     // Set up bot commands menu
@@ -119,17 +213,17 @@ async function setupBotCommands() {
   }
 }
 
-function createAdminNotification(data) {
+function createAdminNotification(answers) {
   return `
 📢 New Project Submitted!
-👤 Client: ${data[0] || 'Not specified'}
-🏗️ Room: ${data[1] || 'Not specified'}
-📍 Location: ${data[2] || 'Not specified'}
-🌟 Goal: ${data[3] || 'Not specified'}
-💪 Work done: ${data[4] || 'Not specified'}
-🧱 Materials: ${data[5] || 'Not specified'}
-✨ Features: ${data[6] || 'Not specified'}
-📂 Drive: ${data[7] || 'Not specified'}
+👤 Client: ${answers[0] || 'Not specified'}
+🏗️ Room: ${answers[1] || 'Not specified'}
+📍 Location: ${answers[2] || 'Not specified'}
+🌟 Goal: ${answers[3] || 'Not specified'}
+💪 Work done: ${answers[4] || 'Not specified'}
+🧱 Materials: ${answers[5] || 'Not specified'}
+✨ Features: ${answers[6] || 'Not specified'}
+📂 Drive: ${answers[7] || 'Not specified'}
   `.trim();
 }
 
@@ -161,8 +255,8 @@ I help collect information about completed renovation projects for content creat
   await sendMessage(chatId, welcomeText, createMainMenu());
 }
 
-module.exports = async (req, res) => {
-  console.log(`${new Date().toISOString()} - ${req.method} request`);
+export default async function handler(req, res) {
+  console.log(`${new Date().toISOString()} - ${req.method} request received`);
   
   if (req.method !== 'POST') {
     return res.status(200).json({ message: 'This endpoint handles Telegram webhook events' });
@@ -172,12 +266,16 @@ module.exports = async (req, res) => {
     const botToken = process.env.BOT_TOKEN;
     const update = req.body;
     
+    console.log('Received update:', JSON.stringify(update, null, 2));
+    
     // Handle callback queries (inline button presses)
     if (update.callback_query) {
       const callbackQuery = update.callback_query;
       const chatId = callbackQuery.message.chat.id;
       const userId = callbackQuery.from.id;
       const data = callbackQuery.data;
+      
+      console.log(`Callback query from ${userId}: ${data}`);
       
       // Answer callback query to remove loading state
       await makeApiCall('answerCallbackQuery', {
@@ -226,8 +324,6 @@ Use /start anytime to return to the main menu.
         
         await sendMessage(chatId, helpText);
         
-        // REMOVED: Automatic menu display after help
-        
       } else if (data === 'about_bot') {
         const aboutText = `
 *📊 About Renovation Project Bot*
@@ -248,20 +344,19 @@ This bot streamlines the collection of renovation project information for busine
 - 📈 Project analytics and reporting
 
 *Security:*
-All data is processed securely and sent directly to project administrators.
+All data is processed securely and sent directly to project administrators and saved to Google Sheets.
 
 Ready to submit a project? Use /start to return to the main menu.
         `;
         
         await sendMessage(chatId, aboutText);
-        
-        // REMOVED: Automatic menu display after about
       }
       
       return res.status(200).json({ ok: true });
     }
     
     if (!update.message) {
+      console.log('No message in update');
       return res.status(200).json({ ok: true });
     }
     
@@ -332,6 +427,8 @@ Need to go back to the main menu? Just type /start
     if (userSessions[userId]) {
       const session = userSessions[userId];
       
+      console.log(`Survey response from ${userId}, step ${session.step}: ${text}`);
+      
       // Save answer
       if (text === 'Skip this question ⏭️') {
         session.answers[session.step] = 'Not specified';
@@ -345,6 +442,15 @@ Need to go back to the main menu? Just type /start
       if (session.step >= questions.length) {
         // Survey completed
         const answers = session.answers;
+        
+        console.log('Survey completed, answers:', answers);
+        
+        // Validate Google Drive link if provided
+        if (answers[7] && answers[7] !== 'Not specified' && !validateDriveLink(answers[7])) {
+          await sendMessage(chatId, '❌ Please provide a valid Google Drive link. The link should contain "drive.google.com" or "docs.google.com".\n\nPlease send the Google Drive link again:');
+          session.step--; // Go back to previous question
+          return res.status(200).json({ ok: true });
+        }
         
         // Send summary
         const summaryMessage = `
@@ -365,24 +471,34 @@ Processing and saving your data...
         
         await sendMessage(chatId, summaryMessage);
         
-        // Send notification to admin
-        const adminChatId = process.env.ADMIN_CHAT_ID;
-        if (adminChatId) {
-          const notificationText = createAdminNotification(answers);
-          await sendMessage(adminChatId, notificationText);
+        try {
+          // Save to Google Sheets
+          console.log('Attempting to save to Google Sheets...');
+          await addRowToSheet(answers);
+          console.log('Successfully saved to Google Sheets');
+          
+          // Send notification to admin
+          const adminChatId = process.env.ADMIN_CHAT_ID;
+          if (adminChatId) {
+            const notificationText = createAdminNotification(answers);
+            await sendMessage(adminChatId, notificationText);
+            console.log('Admin notification sent');
+          }
+          
+          // Confirmation
+          await sendMessage(chatId, '🎉 *Project data successfully saved to Google Sheets!*\n\nThank you for your submission. The information has been sent to the project administrators and saved to our database.\n\n• Use /start to return to main menu\n• Use "🚀 Start New Survey" to submit another project', {
+            reply_markup: { remove_keyboard: true }
+          });
+          
+        } catch (error) {
+          console.error('Error saving to Google Sheets:', error);
+          await sendMessage(chatId, '❌ Error saving data to Google Sheets. The survey data has been recorded but there was an issue with the database.\n\nPlease contact support or try again later.\n\nError: ' + error.message);
         }
-        
-        // Confirmation - REMOVED automatic menu display
-        await sendMessage(chatId, '🎉 *Project data successfully saved!*\n\nThank you for your submission. The information has been sent to the project administrators.\n\n• Use /start to return to main menu\n• Use "🚀 Start New Survey" to submit another project', {
-          reply_markup: { remove_keyboard: true }
-        });
         
         delete userSessions[userId];
         
-        // REMOVED: Automatic menu display after completion
-        
       } else {
-        // Ask next question - KEEP SKIP BUTTON FOR ALL QUESTIONS
+        // Ask next question
         const nextQuestion = questions[session.step];
         
         const options = {
@@ -403,6 +519,7 @@ Processing and saving your data...
     
   } catch (error) {
     console.error('Webhook error:', error);
-    return res.status(200).json({ error: 'Internal error', ok: false });
+    console.error('Error stack:', error.stack);
+    return res.status(200).json({ error: 'Internal error', details: error.message, ok: false });
   }
-};
+}
