@@ -5,6 +5,18 @@ import https from 'https';
 // Store user sessions in memory (for production use database)
 const userSessions = {};
 
+// Авторизованные пользователи
+const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ? 
+  process.env.AUTHORIZED_USERS.split(',').map(id => parseInt(id.trim())) : 
+  [];
+
+console.log('✅ Authorized users loaded:', AUTHORIZED_USERS);
+
+// Функция проверки авторизации
+function isUserAuthorized(userId) {
+  return AUTHORIZED_USERS.length === 0 || AUTHORIZED_USERS.includes(userId);
+}
+
 // Questions in the survey
 const questions = [
   "🙋‍♂️ What is the client's name?",
@@ -104,6 +116,21 @@ function makeApiCall(method, params = {}) {
   });
 }
 
+// Функция отправки сообщения о неавторизованном доступе
+async function sendUnauthorizedMessage(chatId, userId) {
+  const message = `
+🚫 *Access Denied*
+
+Sorry, you are not authorized to use this bot.
+
+This bot is restricted to authorized team members only. If you believe this is an error, please contact the administrator.
+
+*Your User ID:* \`${userId}\`
+  `;
+  
+  await sendMessage(chatId, message);
+}
+
 async function initializeGoogleSheets() {
   try {
     // Parse service account credentials from environment variables
@@ -122,13 +149,13 @@ async function initializeGoogleSheets() {
     const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
     await doc.loadInfo();
     
-    console.log(`Connected to Google Sheet: ${doc.title}`);
+    console.log(`✅ Connected to Google Sheet: ${doc.title}`);
     
     // Get first sheet or create new one if it doesn't exist
     let sheet = doc.sheetsByIndex[0];
     if (!sheet) {
       sheet = await doc.addSheet({ title: 'Renovation Projects' });
-      console.log('Created new sheet: Renovation Projects');
+      console.log('✅ Created new sheet: Renovation Projects');
     }
     
     // Check if column headers are set
@@ -137,19 +164,19 @@ async function initializeGoogleSheets() {
     if (!sheet.headerValues || sheet.headerValues.length === 0) {
       // If table is empty, add headers
       await sheet.setHeaderRow(COLUMN_HEADERS);
-      console.log('Added headers to Google Sheet');
+      console.log('✅ Added headers to Google Sheet');
     }
     
     return sheet;
   } catch (error) {
-    console.error('Error initializing Google Sheets:', error);
+    console.error('❌ Error initializing Google Sheets:', error);
     throw error;
   }
 }
 
 async function addRowToSheet(answers) {
   try {
-    console.log('Attempting to add row to Google Sheets...');
+    console.log('📝 Attempting to add row to Google Sheets...');
     const sheet = await initializeGoogleSheets();
     
     // Create new row with today's date and project data
@@ -165,15 +192,15 @@ async function addRowToSheet(answers) {
       'Drive Link': answers[7] || 'Not specified'
     };
     
-    console.log('Adding row:', newRow);
+    console.log('📊 Adding row:', newRow);
     
     // Add row to sheet
     await sheet.addRow(newRow);
     
-    console.log('Row added to Google Sheets successfully');
+    console.log('✅ Row added to Google Sheets successfully');
     return true;
   } catch (error) {
-    console.error('Error adding row to sheet:', error);
+    console.error('❌ Error adding row to sheet:', error);
     console.error('Error details:', error.message);
     throw error;
   }
@@ -207,9 +234,9 @@ async function setupBotCommands() {
       ]
     });
     
-    console.log('Bot commands menu set up successfully');
+    console.log('✅ Bot commands menu set up successfully');
   } catch (error) {
-    console.error('Error setting up bot commands:', error);
+    console.error('❌ Error setting up bot commands:', error);
   }
 }
 
@@ -263,10 +290,8 @@ export default async function handler(req, res) {
   }
 
   try {
-    const botToken = process.env.BOT_TOKEN;
     const update = req.body;
-    
-    console.log('Received update:', JSON.stringify(update, null, 2));
+    console.log('📨 Received update:', JSON.stringify(update, null, 2));
     
     // Handle callback queries (inline button presses)
     if (update.callback_query) {
@@ -275,7 +300,19 @@ export default async function handler(req, res) {
       const userId = callbackQuery.from.id;
       const data = callbackQuery.data;
       
-      console.log(`Callback query from ${userId}: ${data}`);
+      console.log(`🔘 Callback query from ${userId}: ${data}`);
+      
+      // 🔐 ПРОВЕРКА АВТОРИЗАЦИИ
+      if (!isUserAuthorized(userId)) {
+        console.log(`🚫 Unauthorized access attempt by user ${userId}`);
+        await makeApiCall('answerCallbackQuery', {
+          callback_query_id: callbackQuery.id,
+          text: "Access denied",
+          show_alert: true
+        });
+        await sendUnauthorizedMessage(chatId, userId);
+        return res.status(200).json({ ok: true });
+      }
       
       // Answer callback query to remove loading state
       await makeApiCall('answerCallbackQuery', {
@@ -356,7 +393,7 @@ Ready to submit a project? Use /start to return to the main menu.
     }
     
     if (!update.message) {
-      console.log('No message in update');
+      console.log('❌ No message in update');
       return res.status(200).json({ ok: true });
     }
     
@@ -364,7 +401,14 @@ Ready to submit a project? Use /start to return to the main menu.
     const text = update.message.text;
     const userId = update.message.from.id;
     
-    console.log(`Message from ${userId}: ${text}`);
+    console.log(`💬 Message from ${userId}: ${text}`);
+    
+    // 🔐 ПРОВЕРКА АВТОРИЗАЦИИ для всех команд
+    if (!isUserAuthorized(userId)) {
+      console.log(`🚫 Unauthorized access attempt by user ${userId}`);
+      await sendUnauthorizedMessage(chatId, userId);
+      return res.status(200).json({ ok: true });
+    }
     
     // Set up bot commands only on first /start
     if (text === '/start') {
@@ -427,7 +471,7 @@ Need to go back to the main menu? Just type /start
     if (userSessions[userId]) {
       const session = userSessions[userId];
       
-      console.log(`Survey response from ${userId}, step ${session.step}: ${text}`);
+      console.log(`📝 Survey response from ${userId}, step ${session.step}: ${text}`);
       
       // Save answer
       if (text === 'Skip this question ⏭️') {
@@ -443,7 +487,7 @@ Need to go back to the main menu? Just type /start
         // Survey completed
         const answers = session.answers;
         
-        console.log('Survey completed, answers:', answers);
+        console.log('✅ Survey completed, answers:', answers);
         
         // Validate Google Drive link if provided
         if (answers[7] && answers[7] !== 'Not specified' && !validateDriveLink(answers[7])) {
@@ -473,16 +517,16 @@ Processing and saving your data...
         
         try {
           // Save to Google Sheets
-          console.log('Attempting to save to Google Sheets...');
+          console.log('📊 Attempting to save to Google Sheets...');
           await addRowToSheet(answers);
-          console.log('Successfully saved to Google Sheets');
+          console.log('✅ Successfully saved to Google Sheets');
           
           // Send notification to admin
           const adminChatId = process.env.ADMIN_CHAT_ID;
           if (adminChatId) {
             const notificationText = createAdminNotification(answers);
             await sendMessage(adminChatId, notificationText);
-            console.log('Admin notification sent');
+            console.log('✅ Admin notification sent');
           }
           
           // Confirmation
@@ -491,7 +535,7 @@ Processing and saving your data...
           });
           
         } catch (error) {
-          console.error('Error saving to Google Sheets:', error);
+          console.error('❌ Error saving to Google Sheets:', error);
           await sendMessage(chatId, '❌ Error saving data to Google Sheets. The survey data has been recorded but there was an issue with the database.\n\nPlease contact support or try again later.\n\nError: ' + error.message);
         }
         
@@ -518,7 +562,7 @@ Processing and saving your data...
     return res.status(200).json({ ok: true });
     
   } catch (error) {
-    console.error('Webhook error:', error);
+    console.error('❌ Webhook error:', error);
     console.error('Error stack:', error.stack);
     return res.status(200).json({ error: 'Internal error', details: error.message, ok: false });
   }
