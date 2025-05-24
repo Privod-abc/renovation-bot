@@ -16,7 +16,7 @@ const userSessions = {};
 
 // Questions in the survey (removed Google Drive question)
 const questions = [
-  "🙋‍♂️ What is the client's name?",
+  "🙋‍♂️ What is the client name?",
   "🏗️ What room did you work on? (e.g. kitchen, bathroom, laundry room)",
   "📍 In which city and state was this project completed?",
   "🌟 What was the client's goal for this space? (e.g. modernize layout, fix poor lighting, update style, old renovation, etc.)",
