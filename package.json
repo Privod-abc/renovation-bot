@@ -1,4 +1,4 @@
-json{
+{
   "name": "renovation-project-bot",
   "version": "1.0.0",
   "description": "Telegram bot for collecting information about renovation projects",
@@ -13,3 +13,4 @@ json{
     "start": "node api/webhook.js",
     "dev": "node api/webhook.js"
   }
+}
