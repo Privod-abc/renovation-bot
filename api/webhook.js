@@ -1,7 +1,7 @@
-import { GoogleSpreadsheet } from 'google-spreadsheet';
-import { JWT } from 'google-auth-library';
-import { google } from 'googleapis';
-import https from 'https';
+const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { JWT } = require('google-auth-library');
+const { google } = require('googleapis');
+const https = require('https');
 
 // Authorized user IDs (from environment variables)
 const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ? 
@@ -14,9 +14,9 @@ const PARENT_FOLDER_ID = process.env.PARENT_FOLDER_ID;
 // Store user sessions in memory (for production use database)
 const userSessions = {};
 
-// Questions in the survey (removed Google Drive question)
+// Questions in the survey (7 questions, Google Drive folder created automatically)
 const questions = [
-  "🙋‍♂️ What is the client name?",
+  "🙋‍♂️ What is the client's name?",
   "🏗️ What room did you work on? (e.g. kitchen, bathroom, laundry room)",
   "📍 In which city and state was this project completed?",
   "🌟 What was the client's goal for this space? (e.g. modernize layout, fix poor lighting, update style, old renovation, etc.)",
@@ -329,7 +329,7 @@ function checkUserAuthorization(userId) {
   return AUTHORIZED_USERS.includes(userId);
 }
 
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
   console.log(`${new Date().toISOString()} - ${req.method} request received`);
   
   if (req.method !== 'POST') {
@@ -369,7 +369,7 @@ export default async function handler(req, res) {
       if (data === 'start_survey') {
         userSessions[userId] = { step: 0, answers: [] };
         
-        await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project. After completion, I will automatically create an organized Google Drive folder for this project.\n\nLet\'s begin!');
+        await sendMessage(chatId, '📝 *Starting Project Survey - Version 2.0*\n\nI will guide you through 7 questions about your completed renovation project. After completion, I will automatically create an organized Google Drive folder for this project.\n\nLet\'s begin!');
         
         await sendMessage(chatId, questions[0], {
           reply_markup: {
@@ -484,7 +484,7 @@ Ready to submit a project? Use /start to return to the main menu.
     if (text === '/survey') {
       userSessions[userId] = { step: 0, answers: [] };
       
-      await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project. After completion, I will automatically create an organized Google Drive folder for this project.\n\nLet\'s begin!');
+      await sendMessage(chatId, '📝 *Starting Project Survey - Version 2.0*\n\nI will guide you through 7 questions about your completed renovation project. After completion, I will automatically create an organized Google Drive folder for this project.\n\nLet\'s begin!');
       
       await sendMessage(chatId, questions[0], {
         reply_markup: {
@@ -656,4 +656,4 @@ Please try again later or contact support.
     console.error('Error stack:', error.stack);
     return res.status(200).json({ error: 'Internal error', details: error.message, ok: false });
   }
-}
+};
