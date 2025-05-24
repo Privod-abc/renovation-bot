@@ -387,19 +387,15 @@ Processing and saving your data...
         }, 2000);
         
       } else {
-        // Ask next question
+        // Ask next question - KEEP SKIP BUTTON FOR ALL QUESTIONS
         const nextQuestion = questions[session.step];
+        
         const options = {
           reply_markup: {
             keyboard: [[{ text: 'Skip this question ⏭️' }]],
             resize_keyboard: true
           }
         };
-        
-        // Remove keyboard for last question (Google Drive link)
-        if (session.step === questions.length - 1) {
-          options.reply_markup = { remove_keyboard: true };
-        }
         
         await sendMessage(chatId, nextQuestion, options);
       }
