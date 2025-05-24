@@ -369,7 +369,7 @@ export default async function handler(req, res) {
       if (data === 'start_survey') {
         userSessions[userId] = { step: 0, answers: [] };
         
-        await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project. After completion, I will automatically create an organized Google Drive folder for this project.\n\nLet\'s begin!');
+        await sendMessage(chatId, '📝 *Starting Project Survey - Version 2.0*\n\nI will guide you through 7 questions about your completed renovation project. After completion, I will automatically create an organized Google Drive folder for this project.\n\nLet\'s begin!');
         
         await sendMessage(chatId, questions[0], {
           reply_markup: {
