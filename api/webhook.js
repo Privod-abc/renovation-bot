@@ -226,10 +226,7 @@ Use /start anytime to return to the main menu.
         
         await sendMessage(chatId, helpText);
         
-        // Show menu again after help
-        setTimeout(() => {
-          showMainMenu(chatId);
-        }, 1000);
+        // REMOVED: Automatic menu display after help
         
       } else if (data === 'about_bot') {
         const aboutText = `
@@ -253,15 +250,12 @@ This bot streamlines the collection of renovation project information for busine
 *Security:*
 All data is processed securely and sent directly to project administrators.
 
-Ready to submit a project? Click "🚀 Start New Survey"
+Ready to submit a project? Use /start to return to the main menu.
         `;
         
         await sendMessage(chatId, aboutText);
         
-        // Show menu again after about
-        setTimeout(() => {
-          showMainMenu(chatId);
-        }, 1000);
+        // REMOVED: Automatic menu display after about
       }
       
       return res.status(200).json({ ok: true });
@@ -277,8 +271,10 @@ Ready to submit a project? Click "🚀 Start New Survey"
     
     console.log(`Message from ${userId}: ${text}`);
     
-    // Set up bot commands on first interaction
-    await setupBotCommands();
+    // Set up bot commands only on first /start
+    if (text === '/start') {
+      await setupBotCommands();
+    }
     
     // Handle /start command - show menu immediately
     if (text === '/start') {
@@ -315,6 +311,8 @@ Use /start to see the main menu with all options.
 - /cancel - Cancel current survey
 
 During surveys, you can skip questions using the "Skip this question ⏭️" button.
+
+Need to go back to the main menu? Just type /start
       `;
       
       await sendMessage(chatId, helpText);
@@ -374,17 +372,14 @@ Processing and saving your data...
           await sendMessage(adminChatId, notificationText);
         }
         
-        // Confirmation with menu
-        await sendMessage(chatId, '🎉 *Project data successfully saved!*\n\nThank you for your submission. The information has been sent to the project administrators.\n\nUse /start to return to the main menu or submit another project.', {
+        // Confirmation - REMOVED automatic menu display
+        await sendMessage(chatId, '🎉 *Project data successfully saved!*\n\nThank you for your submission. The information has been sent to the project administrators.\n\n• Use /start to return to main menu\n• Use "🚀 Start New Survey" to submit another project', {
           reply_markup: { remove_keyboard: true }
         });
         
         delete userSessions[userId];
         
-        // Show main menu again after completion
-        setTimeout(() => {
-          showMainMenu(chatId);
-        }, 2000);
+        // REMOVED: Automatic menu display after completion
         
       } else {
         // Ask next question - KEEP SKIP BUTTON FOR ALL QUESTIONS
