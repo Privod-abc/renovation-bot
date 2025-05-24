@@ -274,6 +274,10 @@ I help collect information about completed renovation projects for content creat
 export default async function handler(req, res) {
   console.log(`${new Date().toISOString()} - ${req.method} request received`);
   
+  // ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ СЕССИЙ
+  console.log('🗂️ Sessions at start:', Object.keys(userSessions).length);
+  console.log('📊 Sessions data:', JSON.stringify(userSessions, null, 2));
+  
   if (req.method !== 'POST') {
     return res.status(200).json({ message: 'This endpoint handles Telegram webhook events' });
   }
@@ -282,7 +286,7 @@ export default async function handler(req, res) {
     const botToken = process.env.BOT_TOKEN;
     const update = req.body;
     
-    console.log('Received update:', JSON.stringify(update, null, 2));
+    console.log('📨 Received update:', JSON.stringify(update, null, 2));
     
     // Handle callback queries (inline button presses)
     if (update.callback_query) {
@@ -311,6 +315,9 @@ export default async function handler(req, res) {
       
       if (data === 'start_survey') {
         userSessions[userId] = { step: 0, answers: [] };
+        console.log('✅ CREATED SESSION for user:', userId);
+        console.log('📋 Session data:', userSessions[userId]);
+        console.log('🗂️ All sessions after creation:', Object.keys(userSessions));
         
         await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 8 questions about your completed renovation project. You can skip any question if needed.\n\nLet\'s begin!');
         
@@ -391,7 +398,11 @@ Ready to submit a project? Use /start to return to the main menu.
     const text = update.message.text;
     const userId = update.message.from.id;
     
-    console.log(`Message from ${userId}: ${text}`);
+    console.log(`💬 Message from ${userId}: ${text}`);
+    console.log('🔍 Checking session for user:', userId);
+    console.log('📊 Current sessions:', Object.keys(userSessions));
+    console.log('❓ Session exists:', !!userSessions[userId]);
+    console.log('📋 Session data:', userSessions[userId]);
     
     // ПРОВЕРКА АВТОРИЗАЦИИ  
     if (!isUserAuthorized(userId)) {
@@ -426,6 +437,8 @@ Ready to submit a project? Use /start to return to the main menu.
     // Handle /survey command - start survey directly
     if (text === '/survey') {
       userSessions[userId] = { step: 0, answers: [] };
+      console.log('✅ CREATED SESSION via /survey for user:', userId);
+      console.log('📋 Session data:', userSessions[userId]);
       
       await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 8 questions about your completed renovation project. You can skip any question if needed.\n\nLet\'s begin!');
       
@@ -473,7 +486,8 @@ Need to go back to the main menu? Just type /start
     if (userSessions[userId]) {
       const session = userSessions[userId];
       
-      console.log(`Survey response from ${userId}, step ${session.step}: ${text}`);
+      console.log(`📝 Survey response from ${userId}, step ${session.step}: ${text}`);
+      console.log('📊 Session before processing:', session);
       
       // Save answer
       if (text === 'Skip this question ⏭️') {
@@ -558,6 +572,9 @@ Processing and saving your data...
       }
     } else {
       // If user sends a message without active session, show menu
+      console.log('❌ NO SESSION FOUND for user:', userId);
+      console.log('📊 Available sessions:', Object.keys(userSessions));
+      console.log('🔍 Session lookup result:', userSessions[userId]);
       await sendMessage(chatId, 'Hi! 👋 Use /start to see the main menu and available options.');
     }
     
