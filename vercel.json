@@ -11,10 +11,7 @@
       "src": "/api/webhook",
       "dest": "api/webhook.js"
     }
-  ],
-  "functions": {
-    "api/webhook.js": {
-      "runtime": "nodejs18.x"
-    }
+
+
   }
 }
