@@ -1,52 +1,36 @@
-import { createBot } from '../lib/bot.js';
-
-// Create bot instance
-const bot = createBot();
-
-// Function to setup webhook
-async function setupWebhook() {
-  try {
-    const webhookUrl = process.env.WEBHOOK_URL;
-    if (!webhookUrl) {
-      console.error('WEBHOOK_URL not set in environment variables');
-      return;
-    }
-
-    // Set webhook for the bot
-    await bot.telegram.setWebhook(webhookUrl);
-    console.log(`Webhook set to ${webhookUrl}`);
-  } catch (error) {
-    console.error('Error setting webhook:', error);
-  }
-}
-
-// In development mode, run bot in long polling mode
-if (process.env.NODE_ENV === 'development') {
-  bot.launch();
-  console.log('Bot is running in development mode (long polling)');
-  
-  // Enable graceful stop
-  process.once('SIGINT', () => bot.stop('SIGINT'));
-  process.once('SIGTERM', () => bot.stop('SIGTERM'));
-} else {
-  // In production mode, setup webhook
-  setupWebhook().catch(console.error);
-}
-
-// Handler for Vercel serverless function
+// Simple test version for diagnostics
 export default async function handler(req, res) {
+  console.log('Webhook called with method:', req.method);
+  console.log('Request body:', JSON.stringify(req.body));
+
+  if (req.method !== 'POST') {
+    return res.status(200).json({ message: 'This endpoint handles Telegram webhook events' });
+  }
+
   try {
-    // Check that the request is POST
-    if (req.method !== 'POST') {
-      res.status(200).json({ message: 'This endpoint handles Telegram webhook events' });
-      return;
+    // Simple response to test if webhook works
+    const botToken = process.env.BOT_TOKEN;
+    const update = req.body;
+    
+    if (update.message && update.message.text === '/start') {
+      const chatId = update.message.chat.id;
+      
+      // Send simple response
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: '🤖 Bot is working! This is a test response.'
+        })
+      });
+      
+      console.log('Response sent:', await response.text());
     }
     
-    // Process webhook update
-    await bot.handleUpdate(req.body);
     res.status(200).json({ ok: true });
   } catch (error) {
-    console.error('Error handling webhook:', error);
-    res.status(500).json({ error: 'Failed to process webhook' });
-  }
-}
+    console.error('Error:', error);
+    res.status(500).json({ e
