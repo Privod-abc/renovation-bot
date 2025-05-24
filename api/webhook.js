@@ -1,11 +1,18 @@
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
+import { google } from 'googleapis';
 import https from 'https';
+
+// Authorized user IDs
+const AUTHORIZED_USERS = [130060469, 2038732914, 5914538333, 5912713042];
+
+// Parent folder ID for client projects
+const PARENT_FOLDER_ID = '1EHERFLB3b8obfdFFzxqsrqyp5llXYk6z';
 
 // Store user sessions in memory (for production use database)
 const userSessions = {};
 
-// Questions in the survey
+// Questions in the survey (removed Google Drive question)
 const questions = [
   "🙋‍♂️ What is the client's name?",
   "🏗️ What room did you work on? (e.g. kitchen, bathroom, laundry room)",
@@ -13,8 +20,7 @@ const questions = [
   "🌟 What was the client's goal for this space? (e.g. modernize layout, fix poor lighting, update style, old renovation, etc.)",
   "💪 What work was done during the remodel?",
   "🧱 What materials were used? (Include names, colors, manufacturers if possible)",
-  "✨ Were there any interesting features or smart solutions implemented? (e.g. round lighting, hidden drawers, custom panels)",
-  "📂 Please paste the Google Drive folder link (with subfolders: before / after / 3D / drawings)"
+  "✨ Were there any interesting features or smart solutions implemented? (e.g. round lighting, hidden drawers, custom panels)"
 ];
 
 // Column headers for Google Sheets
@@ -147,7 +153,73 @@ async function initializeGoogleSheets() {
   }
 }
 
-async function addRowToSheet(answers) {
+async function createClientFolder(clientName, roomType) {
+  try {
+    console.log('Creating client folder on Google Drive...');
+    
+    // Parse service account credentials
+    const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    
+    // Create JWT client for Google Drive API
+    const auth = new JWT({
+      email: serviceAccountKey.client_email,
+      key: serviceAccountKey.private_key,
+      scopes: ['https://www.googleapis.com/auth/drive'],
+    });
+    
+    // Initialize Google Drive API
+    const drive = google.drive({ version: 'v3', auth });
+    
+    // Create main project folder name
+    const currentDate = new Date().toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).replace(/\//g, '-');
+    
+    const folderName = `${clientName} - ${roomType} - ${currentDate}`;
+    
+    console.log(`Creating folder: ${folderName}`);
+    
+    // Create main project folder
+    const mainFolder = await drive.files.create({
+      requestBody: {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [PARENT_FOLDER_ID]
+      }
+    });
+    
+    const mainFolderId = mainFolder.data.id;
+    console.log(`Main folder created with ID: ${mainFolderId}`);
+    
+    // Create subfolders
+    const subfolders = ['Before', 'After', '3D visualization', 'Floor plans'];
+    
+    for (const subfolderName of subfolders) {
+      await drive.files.create({
+        requestBody: {
+          name: subfolderName,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [mainFolderId]
+        }
+      });
+      console.log(`Created subfolder: ${subfolderName}`);
+    }
+    
+    // Generate shareable link
+    const driveLink = `https://drive.google.com/drive/folders/${mainFolderId}`;
+    
+    console.log(`Folder structure created successfully: ${driveLink}`);
+    return driveLink;
+    
+  } catch (error) {
+    console.error('Error creating client folder:', error);
+    throw error;
+  }
+}
+
+async function addRowToSheet(answers, driveLink) {
   try {
     console.log('Attempting to add row to Google Sheets...');
     const sheet = await initializeGoogleSheets();
@@ -162,7 +234,7 @@ async function addRowToSheet(answers) {
       'Work Done': answers[4] || 'Not specified',
       'Materials': answers[5] || 'Not specified',
       'Features': answers[6] || 'Not specified',
-      'Drive Link': answers[7] || 'Not specified'
+      'Drive Link': driveLink || 'Not specified'
     };
     
     console.log('Adding row:', newRow);
@@ -177,10 +249,6 @@ async function addRowToSheet(answers) {
     console.error('Error details:', error.message);
     throw error;
   }
-}
-
-function validateDriveLink(link) {
-  return link.includes('drive.google.com') || link.includes('docs.google.com');
 }
 
 async function setupBotCommands() {
@@ -213,7 +281,7 @@ async function setupBotCommands() {
   }
 }
 
-function createAdminNotification(answers) {
+function createAdminNotification(answers, driveLink) {
   return `
 📢 New Project Submitted!
 👤 Client: ${answers[0] || 'Not specified'}
@@ -223,7 +291,7 @@ function createAdminNotification(answers) {
 💪 Work done: ${answers[4] || 'Not specified'}
 🧱 Materials: ${answers[5] || 'Not specified'}
 ✨ Features: ${answers[6] || 'Not specified'}
-📂 Drive: ${answers[7] || 'Not specified'}
+📂 Drive: ${driveLink || 'Not specified'}
   `.trim();
 }
 
@@ -247,12 +315,16 @@ async function showMainMenu(chatId) {
   const welcomeText = `
 🏠 *Welcome to Renovation Project Bot!*
 
-I help collect information about completed renovation projects for content creation, CRM management, and business analytics.
+I help collect information about completed renovation projects and automatically create organized Google Drive folders for each project.
 
 *Choose an option below to get started:*
   `;
   
   await sendMessage(chatId, welcomeText, createMainMenu());
+}
+
+function checkUserAuthorization(userId) {
+  return AUTHORIZED_USERS.includes(userId);
 }
 
 export default async function handler(req, res) {
@@ -277,6 +349,16 @@ export default async function handler(req, res) {
       
       console.log(`Callback query from ${userId}: ${data}`);
       
+      // Check authorization
+      if (!checkUserAuthorization(userId)) {
+        await makeApiCall('answerCallbackQuery', {
+          callback_query_id: callbackQuery.id,
+          text: "❌ Access denied",
+          show_alert: true
+        });
+        return res.status(200).json({ ok: true });
+      }
+      
       // Answer callback query to remove loading state
       await makeApiCall('answerCallbackQuery', {
         callback_query_id: callbackQuery.id
@@ -285,7 +367,7 @@ export default async function handler(req, res) {
       if (data === 'start_survey') {
         userSessions[userId] = { step: 0, answers: [] };
         
-        await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 8 questions about your completed renovation project. You can skip any question if needed.\n\nLet\'s begin!');
+        await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project. After completion, I will automatically create an organized Google Drive folder for this project.\n\nLet\'s begin!');
         
         await sendMessage(chatId, questions[0], {
           reply_markup: {
@@ -305,9 +387,10 @@ export default async function handler(req, res) {
 
 *Survey Process:*
 1️⃣ Click "🚀 Start New Survey"
-2️⃣ Answer 8 questions about your project
+2️⃣ Answer 7 questions about your project
 3️⃣ Skip questions with "⏭️" button if needed
-4️⃣ Get summary and confirmation
+4️⃣ Bot automatically creates Google Drive folder
+5️⃣ Get summary and confirmation
 
 *Questions Asked:*
 - Client name
@@ -317,7 +400,13 @@ export default async function handler(req, res) {
 - Work completed
 - Materials used
 - Special features
-- Google Drive folder link
+
+*Auto-Created Folder Structure:*
+📁 [Client] - [Room] - [Date]
+  ├── 📁 Before
+  ├── 📁 After
+  ├── 📁 3D visualization
+  └── 📁 Floor plans
 
 Use /start anytime to return to the main menu.
         `;
@@ -329,22 +418,26 @@ Use /start anytime to return to the main menu.
 *📊 About Renovation Project Bot*
 
 *Purpose:*
-This bot streamlines the collection of renovation project information for business use.
+This bot streamlines the collection of renovation project information and automatically creates organized Google Drive folders.
 
-*Data Collection:*
-- 🏠 Project details (client, location, room)
-- 🔧 Work scope and materials
-- ✨ Special features and solutions
-- 📁 Media organization (Google Drive)
+*What It Does:*
+- 🏠 Collects project details (client, location, room)
+- 🔧 Records work scope and materials
+- ✨ Documents special features and solutions
+- 📁 **Automatically creates Google Drive folders**
+- 📊 Saves all data to Google Sheets
 
 *Business Benefits:*
-- 📝 Content creation for marketing
-- 📊 CRM and database management
-- 🎬 Video script generation
+- 📝 Organized project documentation
+- 📊 Automated CRM and database management
+- 🎬 Ready structure for content creation
 - 📈 Project analytics and reporting
 
 *Security:*
-All data is processed securely and sent directly to project administrators and saved to Google Sheets.
+- 🔒 Access restricted to authorized team members only
+- 🛡️ All data processed securely through Google APIs
+
+*Authorized Users: ${AUTHORIZED_USERS.length} team members*
 
 Ready to submit a project? Use /start to return to the main menu.
         `;
@@ -366,6 +459,14 @@ Ready to submit a project? Use /start to return to the main menu.
     
     console.log(`Message from ${userId}: ${text}`);
     
+    // Check authorization for all message types
+    if (!checkUserAuthorization(userId)) {
+      await sendMessage(chatId, '❌ *Access Denied*\n\nThis bot is restricted to authorized team members only.\n\nIf you believe you should have access, please contact the administrator.', {
+        parse_mode: 'Markdown'
+      });
+      return res.status(200).json({ ok: true });
+    }
+    
     // Set up bot commands only on first /start
     if (text === '/start') {
       await setupBotCommands();
@@ -381,7 +482,7 @@ Ready to submit a project? Use /start to return to the main menu.
     if (text === '/survey') {
       userSessions[userId] = { step: 0, answers: [] };
       
-      await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 8 questions about your completed renovation project. You can skip any question if needed.\n\nLet\'s begin!');
+      await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project. After completion, I will automatically create an organized Google Drive folder for this project.\n\nLet\'s begin!');
       
       await sendMessage(chatId, questions[0], {
         reply_markup: {
@@ -406,6 +507,8 @@ Use /start to see the main menu with all options.
 - /cancel - Cancel current survey
 
 During surveys, you can skip questions using the "Skip this question ⏭️" button.
+
+The bot will automatically create a Google Drive folder after completing the survey.
 
 Need to go back to the main menu? Just type /start
       `;
@@ -438,19 +541,14 @@ Need to go back to the main menu? Just type /start
       
       session.step++;
       
-      // Check if survey is complete
+      // Check if survey is complete (now 7 questions instead of 8)
       if (session.step >= questions.length) {
-        // Survey completed
+        // Survey completed - start folder creation process
         const answers = session.answers;
+        const clientName = answers[0] || 'Unknown Client';
+        const roomType = answers[1] || 'Unknown Room';
         
         console.log('Survey completed, answers:', answers);
-        
-        // Validate Google Drive link if provided
-        if (answers[7] && answers[7] !== 'Not specified' && !validateDriveLink(answers[7])) {
-          await sendMessage(chatId, '❌ Please provide a valid Google Drive link. The link should contain "drive.google.com" or "docs.google.com".\n\nPlease send the Google Drive link again:');
-          session.step--; // Go back to previous question
-          return res.status(200).json({ ok: true });
-        }
         
         // Send summary
         const summaryMessage = `
@@ -464,35 +562,69 @@ Need to go back to the main menu? Just type /start
 💪 Work done: ${answers[4]}
 🧱 Materials: ${answers[5]}
 ✨ Features: ${answers[6]}
-📂 Drive: ${answers[7]}
 
-Processing and saving your data...
+🔄 *Creating Google Drive folder...*
+Please wait while I organize your project files.
         `;
         
         await sendMessage(chatId, summaryMessage);
         
         try {
-          // Save to Google Sheets
-          console.log('Attempting to save to Google Sheets...');
-          await addRowToSheet(answers);
+          // Create Google Drive folder
+          console.log('Creating Google Drive folder...');
+          await sendMessage(chatId, '📁 Creating project folder structure:\n📂 Before\n📂 After\n📂 3D visualization\n📂 Floor plans\n\n⏳ This may take a few seconds...');
+          
+          const driveLink = await createClientFolder(clientName, roomType);
+          console.log('Google Drive folder created:', driveLink);
+          
+          // Save to Google Sheets with Drive link
+          console.log('Saving to Google Sheets...');
+          await addRowToSheet(answers, driveLink);
           console.log('Successfully saved to Google Sheets');
           
           // Send notification to admin
           const adminChatId = process.env.ADMIN_CHAT_ID;
           if (adminChatId) {
-            const notificationText = createAdminNotification(answers);
+            const notificationText = createAdminNotification(answers, driveLink);
             await sendMessage(adminChatId, notificationText);
             console.log('Admin notification sent');
           }
           
-          // Confirmation
-          await sendMessage(chatId, '🎉 *Project data successfully saved to Google Sheets!*\n\nThank you for your submission. The information has been sent to the project administrators and saved to our database.\n\n• Use /start to return to main menu\n• Use "🚀 Start New Survey" to submit another project', {
+          // Final confirmation with Drive link
+          await sendMessage(chatId, `🎉 *Project Successfully Processed!*
+
+✅ **Data saved to Google Sheets**
+✅ **Google Drive folder created**
+
+📂 **Your project folder:**
+${driveLink}
+
+The folder contains organized subfolders for:
+• Before photos
+• After photos  
+• 3D visualization
+• Floor plans
+
+Thank you for your submission!
+
+• Use /start to return to main menu
+• Use "🚀 Start New Survey" to submit another project`, {
             reply_markup: { remove_keyboard: true }
           });
           
         } catch (error) {
-          console.error('Error saving to Google Sheets:', error);
-          await sendMessage(chatId, '❌ Error saving data to Google Sheets. The survey data has been recorded but there was an issue with the database.\n\nPlease contact support or try again later.\n\nError: ' + error.message);
+          console.error('Error processing project:', error);
+          await sendMessage(chatId, `❌ **Error Processing Project**
+
+There was an issue creating the Google Drive folder or saving data.
+
+**Error details:** ${error.message}
+
+Please try again later or contact support.
+
+• Use /start to return to main menu`, {
+            reply_markup: { remove_keyboard: true }
+          });
         }
         
         delete userSessions[userId];
