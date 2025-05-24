@@ -1,6 +1,4 @@
 const https = require('https');
-const { GoogleSpreadsheet } = require('google-spreadsheet');
-const { JWT } = require('google-auth-library');
 
 // Store user sessions in memory (for production use database)
 const userSessions = {};
@@ -15,6 +13,71 @@ const questions = [
   "🧱 What materials were used? (Include names, colors, manufacturers if possible)",
   "✨ Were there any interesting features or smart solutions implemented? (e.g. round lighting, hidden drawers, custom panels)"
 ];
+
+// ЛЕГКАЯ интеграция с Google Sheets
+async function addRowToSheet(answers) {
+  try {
+    const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
+    
+    if (!APPS_SCRIPT_URL) {
+      console.log('APPS_SCRIPT_URL not configured, skipping Google Sheets');
+      return false;
+    }
+    
+    const data = {
+      date: new Date().toLocaleDateString('en-US'),
+      client_name: answers[0] || 'Not specified',
+      room_type: answers[1] || 'Not specified',
+      location: answers[2] || 'Not specified',
+      goal: answers[3] || 'Not specified',
+      work_done: answers[4] || 'Not specified',
+      materials: answers[5] || 'Not specified',
+      features: answers[6] || 'Not specified'
+    };
+    
+    const postData = JSON.stringify(data);
+    const url = new URL(APPS_SCRIPT_URL);
+    
+    return new Promise((resolve) => {
+      const options = {
+        hostname: url.hostname,
+        port: 443,
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      };
+      
+      const req = https.request(options, (res) => {
+        let responseData = '';
+        res.on('data', (chunk) => responseData += chunk);
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            console.log('✅ Row added to Google Sheets via Apps Script');
+            resolve(true);
+          } else {
+            console.error('❌ Apps Script error:', responseData);
+            resolve(false);
+          }
+        });
+      });
+      
+      req.on('error', (error) => {
+        console.error('❌ Request error:', error);
+        resolve(false);
+      });
+      
+      req.write(postData);
+      req.end();
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in addRowToSheet:', error);
+    return false;
+  }
+}
 
 function sendMessage(chatId, text, options = {}) {
   return new Promise((resolve, reject) => {
@@ -90,75 +153,19 @@ function makeApiCall(method, params = {}) {
   });
 }
 
-async function addRowToSheet(answers) {
-  try {
-    // Parse service account credentials from environment variables
-    const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-    
-    // Create JWT client for authentication
-    const serviceAccountAuth = new JWT({
-      email: serviceAccountKey.client_email,
-      key: serviceAccountKey.private_key,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-
-    // Initialize document
-    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
-    await doc.loadInfo();
-    
-    // Get first sheet
-    let sheet = doc.sheetsByIndex[0];
-    
-    // Create new row with today's date and project data
-    const newRow = {
-      'Date': new Date().toLocaleDateString('en-US'),
-      'Client Name': answers[0] || 'Not specified',
-      'Room Type': answers[1] || 'Not specified',
-      'Location': answers[2] || 'Not specified',
-      'Goal': answers[3] || 'Not specified',
-      'Work Done': answers[4] || 'Not specified',
-      'Materials': answers[5] || 'Not specified',
-      'Features': answers[6] || 'Not specified'
-    };
-    
-    // Add row to sheet
-    await sheet.addRow(newRow);
-    
-    console.log('Row added to Google Sheets successfully');
-    return true;
-  } catch (error) {
-    console.error('Error adding row to sheet:', error);
-    return false;
-  }
-}
-
 async function setupBotCommands() {
   try {
-    // Set up bot commands menu
     await makeApiCall('setMyCommands', {
       commands: [
-        {
-          command: 'start',
-          description: '🏠 Show main menu'
-        },
-        {
-          command: 'survey',
-          description: '🚀 Start project survey'
-        },
-        {
-          command: 'help',
-          description: '❓ Show help information'
-        },
-        {
-          command: 'cancel',
-          description: '❌ Cancel current survey'
-        }
+        { command: 'start', description: '🏠 Show main menu' },
+        { command: 'survey', description: '🚀 Start project survey' },
+        { command: 'help', description: '❓ Show help information' },
+        { command: 'cancel', description: '❌ Cancel current survey' }
       ]
     });
-    
-    console.log('Bot commands menu set up successfully');
+    console.log('✅ Bot commands menu set up successfully');
   } catch (error) {
-    console.error('Error setting up bot commands:', error);
+    console.error('❌ Error setting up bot commands:', error);
   }
 }
 
@@ -179,9 +186,7 @@ function createMainMenu() {
   return {
     reply_markup: {
       inline_keyboard: [
-        [
-          { text: '🚀 Start New Survey', callback_data: 'start_survey' }
-        ],
+        [{ text: '🚀 Start New Survey', callback_data: 'start_survey' }],
         [
           { text: '❓ Help & Info', callback_data: 'show_help' },
           { text: '📊 About Bot', callback_data: 'about_bot' }
@@ -211,10 +216,8 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const botToken = process.env.BOT_TOKEN;
     const update = req.body;
-    
-    console.log('Received update:', JSON.stringify(update, null, 2));
+    console.log('📨 Received update:', JSON.stringify(update, null, 2));
     
     // Handle callback queries (inline button presses)
     if (update.callback_query) {
@@ -223,16 +226,15 @@ module.exports = async (req, res) => {
       const userId = callbackQuery.from.id;
       const data = callbackQuery.data;
       
-      console.log(`Callback query from ${userId}: ${data}`);
+      console.log(`🔘 Callback query from ${userId}: ${data}`);
       
-      // Answer callback query to remove loading state
       await makeApiCall('answerCallbackQuery', {
         callback_query_id: callbackQuery.id
       });
       
       if (data === 'start_survey') {
         userSessions[userId] = { step: 0, answers: [] };
-        console.log('Created session for user:', userId, userSessions[userId]);
+        console.log('✅ Created session for user:', userId, userSessions[userId]);
         
         await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project.\n\nLet\'s begin!');
         
@@ -260,9 +262,7 @@ module.exports = async (req, res) => {
 
 Use /start anytime to return to the main menu.
         `;
-        
         await sendMessage(chatId, helpText);
-        
       } else if (data === 'about_bot') {
         const aboutText = `
 *📊 About Renovation Project Bot*
@@ -283,7 +283,6 @@ This bot streamlines the collection of renovation project information for busine
 
 Ready to submit a project? Use /start to return to the main menu.
         `;
-        
         await sendMessage(chatId, aboutText);
       }
       
@@ -291,7 +290,7 @@ Ready to submit a project? Use /start to return to the main menu.
     }
     
     if (!update.message) {
-      console.log('No message in update');
+      console.log('❌ No message in update');
       return res.status(200).json({ ok: true });
     }
     
@@ -299,25 +298,19 @@ Ready to submit a project? Use /start to return to the main menu.
     const text = update.message.text;
     const userId = update.message.from.id;
     
-    console.log(`Message from ${userId}: ${text}`);
-    console.log('Current sessions:', Object.keys(userSessions));
-    console.log('User session exists:', !!userSessions[userId]);
+    console.log(`💬 Message from ${userId}: ${text}`);
+    console.log('📊 Current sessions:', Object.keys(userSessions));
+    console.log('🔍 User session exists:', !!userSessions[userId]);
     
-    // Set up bot commands only on first /start
     if (text === '/start') {
       await setupBotCommands();
-    }
-    
-    // Handle /start command - show menu immediately
-    if (text === '/start') {
       await showMainMenu(chatId);
       return res.status(200).json({ ok: true });
     }
     
-    // Handle /survey command - start survey directly
     if (text === '/survey') {
       userSessions[userId] = { step: 0, answers: [] };
-      console.log('Created session for user:', userId, userSessions[userId]);
+      console.log('✅ Created session for user:', userId, userSessions[userId]);
       
       await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project.\n\nLet\'s begin!');
       
@@ -331,7 +324,6 @@ Ready to submit a project? Use /start to return to the main menu.
       return res.status(200).json({ ok: true });
     }
     
-    // Handle /help command
     if (text === '/help') {
       const helpText = `
 *❓ Renovation Project Bot Help*
@@ -347,12 +339,10 @@ During surveys, you can skip questions using the "Skip this question ⏭️" but
 
 Need to go back to the main menu? Just type /start
       `;
-      
       await sendMessage(chatId, helpText);
       return res.status(200).json({ ok: true });
     }
     
-    // Handle /cancel command
     if (text === '/cancel') {
       delete userSessions[userId];
       await sendMessage(chatId, '❌ Survey cancelled.\n\nUse /start to return to the main menu.', {
@@ -365,7 +355,7 @@ Need to go back to the main menu? Just type /start
     if (userSessions[userId]) {
       const session = userSessions[userId];
       
-      console.log(`Survey response from ${userId}, step ${session.step}: ${text}`);
+      console.log(`📝 Survey response from ${userId}, step ${session.step}: ${text}`);
       
       // Save answer
       if (text === 'Skip this question ⏭️') {
@@ -378,10 +368,8 @@ Need to go back to the main menu? Just type /start
       
       // Check if survey is complete
       if (session.step >= questions.length) {
-        // Survey completed
         const answers = session.answers;
         
-        // Send summary
         const summaryMessage = `
 *✅ Project Survey Completed!*
 
@@ -407,9 +395,9 @@ Thank you for your submission!
         // Save to Google Sheets (non-blocking)
         addRowToSheet(answers).then(success => {
           if (success) {
-            console.log('Data saved to Google Sheets');
+            console.log('✅ Data saved to Google Sheets');
           } else {
-            console.log('Failed to save to Google Sheets');
+            console.log('⚠️ Failed to save to Google Sheets');
           }
         });
         
@@ -418,9 +406,7 @@ Thank you for your submission!
         if (adminChatId) {
           const notificationText = createAdminNotification(answers);
           await sendMessage(adminChatId, notificationText);
-          console.log('Admin notification sent to:', adminChatId);
-        } else {
-          console.log('No ADMIN_CHAT_ID configured');
+          console.log('✅ Admin notification sent to:', adminChatId);
         }
         
         delete userSessions[userId];
@@ -439,15 +425,14 @@ Thank you for your submission!
         await sendMessage(chatId, nextQuestion, options);
       }
     } else {
-      // If user sends a message without active session, show menu
-      console.log('No session found for user:', userId);
+      console.log('❌ No session found for user:', userId);
       await sendMessage(chatId, 'Hi! 👋 Use /start to see the main menu and available options.');
     }
     
     return res.status(200).json({ ok: true });
     
   } catch (error) {
-    console.error('Webhook error:', error);
+    console.error('❌ Webhook error:', error);
     console.error('Error stack:', error.stack);
     return res.status(200).json({ error: 'Internal error', details: error.message, ok: false });
   }
