@@ -134,7 +134,18 @@ function createMainMenu() {
   };
 }
 
-async function showMainMenu(chatId) {
+function createAdminNotification(answers) {
+  return `
+📢 New Project Submitted!
+👤 Client: ${answers[0] || 'Not specified'}
+🏗️ Room: ${answers[1] || 'Not specified'}
+📍 Location: ${answers[2] || 'Not specified'}
+🌟 Goal: ${answers[3] || 'Not specified'}
+💪 Work done: ${answers[4] || 'Not specified'}
+🧱 Materials: ${answers[5] || 'Not specified'}
+✨ Features: ${answers[6] || 'Not specified'}
+  `.trim();
+}
   const welcomeText = `
 🏠 *Welcome to Renovation Project Bot!*
 
@@ -342,6 +353,16 @@ Thank you for your submission!
         await sendMessage(chatId, summaryMessage, {
           reply_markup: { remove_keyboard: true }
         });
+        
+        // Send notification to admin
+        const adminChatId = process.env.ADMIN_CHAT_ID;
+        if (adminChatId) {
+          const notificationText = createAdminNotification(answers);
+          await sendMessage(adminChatId, notificationText);
+          console.log('Admin notification sent to:', adminChatId);
+        } else {
+          console.log('No ADMIN_CHAT_ID configured');
+        }
         
         delete userSessions[userId];
         
