@@ -198,6 +198,8 @@ function validateDriveLink(link) {
 
 async function setupBotCommands() {
   try {
+    console.log('🔧 Setting up bot commands...');
+    
     // Set up bot commands menu
     await makeApiCall('setMyCommands', {
       commands: [
@@ -220,9 +222,10 @@ async function setupBotCommands() {
       ]
     });
     
-    console.log('Bot commands menu set up successfully');
+    console.log('✅ Bot commands menu set up successfully');
   } catch (error) {
-    console.error('Error setting up bot commands:', error);
+    console.error('❌ Error setting up bot commands:', error);
+    // НЕ ЛОМАЕМ бота, просто логируем ошибку
   }
 }
 
@@ -396,14 +399,27 @@ Ready to submit a project? Use /start to return to the main menu.
       return res.status(200).json({ ok: true });
     }
     
-    // Set up bot commands only on first /start
-    if (text === '/start') {
-      await setupBotCommands();
-    }
-    
     // Handle /start command - show menu immediately
     if (text === '/start') {
-      await showMainMenu(chatId);
+      console.log('🚀 Processing /start command...');
+      
+      try {
+        // Настройка команд БЕЗ блокировки основного потока
+        setupBotCommands().catch(err => {
+          console.error('❌ setupBotCommands failed:', err);
+        });
+        
+        // Показываем меню СРАЗУ, не ждем setupBotCommands
+        await showMainMenu(chatId);
+        console.log('✅ Main menu sent successfully');
+        
+      } catch (error) {
+        console.error('❌ Error in /start handler:', error);
+        
+        // Запасной вариант - простое сообщение
+        await sendMessage(chatId, '🏠 Welcome! Use /start again to see the menu.');
+      }
+      
       return res.status(200).json({ ok: true });
     }
     
