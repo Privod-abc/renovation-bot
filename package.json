@@ -1,13 +1,14 @@
 {
   "name": "renovation-project-bot",
   "version": "1.0.0",
-  "description": "Telegram bot for collecting information about renovation projects",
+  "description": "Telegram bot for collecting information about renovation projects with automatic Google Drive folder creation",
   "main": "api/webhook.js",
   "type": "module",
   "dependencies": {
     "dotenv": "^16.3.1",
     "google-spreadsheet": "^4.1.2",
-    "google-auth-library": "^9.4.1"
+    "google-auth-library": "^9.4.1",
+    "googleapis": "^137.0.0"
   },
   "scripts": {
     "start": "node api/webhook.js",
