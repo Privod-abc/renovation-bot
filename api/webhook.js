@@ -118,6 +118,19 @@ async function setupBotCommands() {
   }
 }
 
+function createAdminNotification(answers) {
+  return `
+📢 New Project Submitted!
+👤 Client: ${answers[0] || 'Not specified'}
+🏗️ Room: ${answers[1] || 'Not specified'}
+📍 Location: ${answers[2] || 'Not specified'}
+🌟 Goal: ${answers[3] || 'Not specified'}
+💪 Work done: ${answers[4] || 'Not specified'}
+🧱 Materials: ${answers[5] || 'Not specified'}
+✨ Features: ${answers[6] || 'Not specified'}
+  `.trim();
+}
+
 function createMainMenu() {
   return {
     reply_markup: {
@@ -134,18 +147,7 @@ function createMainMenu() {
   };
 }
 
-function createAdminNotification(answers) {
-  return `
-📢 New Project Submitted!
-👤 Client: ${answers[0] || 'Not specified'}
-🏗️ Room: ${answers[1] || 'Not specified'}
-📍 Location: ${answers[2] || 'Not specified'}
-🌟 Goal: ${answers[3] || 'Not specified'}
-💪 Work done: ${answers[4] || 'Not specified'}
-🧱 Materials: ${answers[5] || 'Not specified'}
-✨ Features: ${answers[6] || 'Not specified'}
-  `.trim();
-}
+async function showMainMenu(chatId) {
   const welcomeText = `
 🏠 *Welcome to Renovation Project Bot!*
 
