@@ -11,4 +11,3 @@
       "src": "/api/webhook",
       "dest": "api/webhook.js"
     }
-}
