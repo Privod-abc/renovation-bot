@@ -5,6 +5,19 @@ import https from 'https';
 // Store user sessions in memory (for production use database)
 const userSessions = {};
 
+// Авторизованные пользователи
+const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ? 
+  process.env.AUTHORIZED_USERS.split(',').map(id => parseInt(id.trim())) : 
+  [];
+
+console.log('✅ Authorized users loaded:', AUTHORIZED_USERS.length);
+
+// Функция проверки авторизации
+function isUserAuthorized(userId) {
+  if (AUTHORIZED_USERS.length === 0) return true; // Если список пуст - разрешить всем
+  return AUTHORIZED_USERS.includes(userId);
+}
+
 // Questions in the survey
 const questions = [
   "🙋‍♂️ What is the client's name?",
@@ -277,6 +290,17 @@ export default async function handler(req, res) {
       
       console.log(`Callback query from ${userId}: ${data}`);
       
+      // ПРОВЕРКА АВТОРИЗАЦИИ
+      if (!isUserAuthorized(userId)) {
+        await makeApiCall('answerCallbackQuery', {
+          callback_query_id: callbackQuery.id,
+          text: "Access denied",
+          show_alert: true
+        });
+        await sendMessage(chatId, `🚫 Access denied. Your ID: ${userId}`);
+        return res.status(200).json({ ok: true });
+      }
+      
       // Answer callback query to remove loading state
       await makeApiCall('answerCallbackQuery', {
         callback_query_id: callbackQuery.id
@@ -365,6 +389,12 @@ Ready to submit a project? Use /start to return to the main menu.
     const userId = update.message.from.id;
     
     console.log(`Message from ${userId}: ${text}`);
+    
+    // ПРОВЕРКА АВТОРИЗАЦИИ  
+    if (!isUserAuthorized(userId)) {
+      await sendMessage(chatId, `🚫 Access denied. Your ID: ${userId}`);
+      return res.status(200).json({ ok: true });
+    }
     
     // Set up bot commands only on first /start
     if (text === '/start') {
