@@ -1,0 +1,20 @@
+{
+  "name": "renovation-project-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for collecting information about renovation projects",
+  "main": "api/webhook.js",
+  "scripts": {
+    "start": "node api/webhook.js",
+    "dev": "nodemon api/webhook.js"
+  },
+  "keywords": ["telegram", "bot", "renovation", "projects", "google-sheets"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "telegraf": "^4.15.0",
+    "google-spreadsheet": "^4.1.0",
+    "googleapis": "^126.0.1"
+  },
+  "type": "module"
+}
