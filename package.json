@@ -3,7 +3,14 @@
   "version": "1.0.0",
   "description": "Telegram bot for collecting information about renovation projects",
   "main": "api/webhook.js",
+  "type": "module",
   "dependencies": {
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "google-spreadsheet": "^4.1.2",
+    "google-auth-library": "^9.4.1"
+  },
+  "scripts": {
+    "start": "node api/webhook.js",
+    "dev": "node api/webhook.js"
   }
 }
