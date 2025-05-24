@@ -1,4 +1,6 @@
 const https = require('https');
+const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { JWT } = require('google-auth-library');
 
 // Store user sessions in memory (for production use database)
 const userSessions = {};
@@ -86,6 +88,48 @@ function makeApiCall(method, params = {}) {
     request.write(postData);
     request.end();
   });
+}
+
+async function addRowToSheet(answers) {
+  try {
+    // Parse service account credentials from environment variables
+    const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    
+    // Create JWT client for authentication
+    const serviceAccountAuth = new JWT({
+      email: serviceAccountKey.client_email,
+      key: serviceAccountKey.private_key,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    // Initialize document
+    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
+    await doc.loadInfo();
+    
+    // Get first sheet
+    let sheet = doc.sheetsByIndex[0];
+    
+    // Create new row with today's date and project data
+    const newRow = {
+      'Date': new Date().toLocaleDateString('en-US'),
+      'Client Name': answers[0] || 'Not specified',
+      'Room Type': answers[1] || 'Not specified',
+      'Location': answers[2] || 'Not specified',
+      'Goal': answers[3] || 'Not specified',
+      'Work Done': answers[4] || 'Not specified',
+      'Materials': answers[5] || 'Not specified',
+      'Features': answers[6] || 'Not specified'
+    };
+    
+    // Add row to sheet
+    await sheet.addRow(newRow);
+    
+    console.log('Row added to Google Sheets successfully');
+    return true;
+  } catch (error) {
+    console.error('Error adding row to sheet:', error);
+    return false;
+  }
 }
 
 async function setupBotCommands() {
@@ -358,6 +402,15 @@ Thank you for your submission!
         
         await sendMessage(chatId, summaryMessage, {
           reply_markup: { remove_keyboard: true }
+        });
+        
+        // Save to Google Sheets (non-blocking)
+        addRowToSheet(answers).then(success => {
+          if (success) {
+            console.log('Data saved to Google Sheets');
+          } else {
+            console.log('Failed to save to Google Sheets');
+          }
         });
         
         // Send notification to admin
