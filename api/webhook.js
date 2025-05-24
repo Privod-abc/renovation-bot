@@ -1,7 +1,21 @@
 const https = require('https');
+const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { JWT } = require('google-auth-library');
 
 // Store user sessions in memory (for production use database)
 const userSessions = {};
+
+// Column headers for Google Sheets
+const COLUMN_HEADERS = [
+  'Date',
+  'Client Name',
+  'Room Type',
+  'Location',
+  'Goal',
+  'Work Done',
+  'Materials',
+  'Features'
+];
 
 // Questions in the survey
 const questions = [
@@ -86,6 +100,80 @@ function makeApiCall(method, params = {}) {
     request.write(postData);
     request.end();
   });
+}
+
+async function initializeGoogleSheets() {
+  try {
+    // Parse service account credentials from environment variables
+    const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    
+    // Create JWT client for authentication
+    const serviceAccountAuth = new JWT({
+      email: serviceAccountKey.client_email,
+      key: serviceAccountKey.private_key,
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+      ],
+    });
+
+    // Initialize document
+    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
+    await doc.loadInfo();
+    
+    console.log(`Connected to Google Sheet: ${doc.title}`);
+    
+    // Get first sheet or create new one if it doesn't exist
+    let sheet = doc.sheetsByIndex[0];
+    if (!sheet) {
+      sheet = await doc.addSheet({ title: 'Renovation Projects' });
+      console.log('Created new sheet: Renovation Projects');
+    }
+    
+    // Check if column headers are set
+    await sheet.loadHeaderRow();
+    
+    if (!sheet.headerValues || sheet.headerValues.length === 0) {
+      // If table is empty, add headers
+      await sheet.setHeaderRow(COLUMN_HEADERS);
+      console.log('Added headers to Google Sheet');
+    }
+    
+    return sheet;
+  } catch (error) {
+    console.error('Error initializing Google Sheets:', error);
+    throw error;
+  }
+}
+
+async function addRowToSheet(answers) {
+  try {
+    console.log('Attempting to add row to Google Sheets...');
+    const sheet = await initializeGoogleSheets();
+    
+    // Create new row with today's date and project data
+    const newRow = {
+      'Date': new Date().toLocaleDateString('en-US'),
+      'Client Name': answers[0] || 'Not specified',
+      'Room Type': answers[1] || 'Not specified',
+      'Location': answers[2] || 'Not specified',
+      'Goal': answers[3] || 'Not specified',
+      'Work Done': answers[4] || 'Not specified',
+      'Materials': answers[5] || 'Not specified',
+      'Features': answers[6] || 'Not specified'
+    };
+    
+    console.log('Adding row:', newRow);
+    
+    // Add row to sheet
+    await sheet.addRow(newRow);
+    
+    console.log('Row added to Google Sheets successfully');
+    return true;
+  } catch (error) {
+    console.error('Error adding row to sheet:', error);
+    console.error('Error details:', error.message);
+    throw error;
+  }
 }
 
 async function setupBotCommands() {
@@ -355,6 +443,15 @@ Thank you for your submission!
         await sendMessage(chatId, summaryMessage, {
           reply_markup: { remove_keyboard: true }
         });
+        
+        // Save to Google Sheets
+        try {
+          console.log('Saving to Google Sheets...');
+          await addRowToSheet(answers);
+          console.log('Successfully saved to Google Sheets');
+        } catch (error) {
+          console.error('Error saving to Google Sheets:', error);
+        }
         
         // Send notification to admin
         const adminChatId = process.env.ADMIN_CHAT_ID;
