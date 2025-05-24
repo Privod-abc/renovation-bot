@@ -3,11 +3,13 @@ import { JWT } from 'google-auth-library';
 import { google } from 'googleapis';
 import https from 'https';
 
-// Authorized user IDs
-const AUTHORIZED_USERS = [130060469, 2038732914, 5914538333, 5912713042];
+// Authorized user IDs (from environment variables)
+const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ? 
+  process.env.AUTHORIZED_USERS.split(',').map(id => parseInt(id.trim())) : 
+  [];
 
-// Parent folder ID for client projects
-const PARENT_FOLDER_ID = '1EHERFLB3b8obfdFFzxqsrqyp5llXYk6z';
+// Parent folder ID for client projects (from environment variables)
+const PARENT_FOLDER_ID = process.env.PARENT_FOLDER_ID;
 
 // Store user sessions in memory (for production use database)
 const userSessions = {};
