@@ -34,7 +34,7 @@ const questions = [
   "✨ Were there any interesting features or smart solutions implemented? (e.g. round lighting, hidden drawers, custom panels)"
 ];
 
-// ИСПРАВЛЕННЫЕ Column headers for Google Sheets
+// Column headers for Google Sheets - ИСПРАВЛЕНО
 const COLUMN_HEADERS = [
   'Date',
   'Client Name',
@@ -215,6 +215,11 @@ async function createProjectFolder(clientName, roomType, location) {
     console.log('📁 === STARTING createProjectFolder ===');
     console.log(`📝 Parameters: client="${clientName}", room="${roomType}", location="${location}"`);
     
+    // ПРОВЕРКА ВХОДНЫХ ПАРАМЕТРОВ
+    if (!clientName || !roomType || !location) {
+      throw new Error('Missing required parameters for folder creation');
+    }
+    
     console.log('🔑 Step A: Parsing service account key...');
     const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
     console.log('✅ Step A: Service account key parsed');
@@ -234,6 +239,11 @@ async function createProjectFolder(clientName, roomType, location) {
     const token = await serviceAccountAuth.getAccessToken();
     console.log('✅ Step C: Access token obtained');
     
+    // ПРОВЕРКА ТОКЕНА
+    if (!token || !token.token) {
+      throw new Error('Failed to obtain access token');
+    }
+    
     // Создаем имя папки
     console.log('📝 Step D: Creating folder name...');
     const date = new Date().toLocaleDateString('en-US', {
@@ -243,6 +253,11 @@ async function createProjectFolder(clientName, roomType, location) {
     });
     const folderName = `${clientName} - ${roomType} - ${date}`;
     console.log(`✅ Step D: Folder name created: "${folderName}"`);
+    
+    // ПРОВЕРКА PARENT_FOLDER_ID
+    if (!process.env.PARENT_FOLDER_ID) {
+      throw new Error('PARENT_FOLDER_ID environment variable is not set');
+    }
     
     // Создаем главную папку
     console.log('🗂️ Step E: Creating main folder...');
@@ -277,6 +292,7 @@ async function createProjectFolder(clientName, roomType, location) {
         
       } catch (subError) {
         console.error(`❌ Step F.${i+1}: Error creating subfolder "${subfolderName}":`, subError);
+        // Продолжаем создание других папок
       }
     }
     
@@ -312,6 +328,10 @@ async function createProjectFolder(clientName, roomType, location) {
     
   } catch (error) {
     console.error('❌ CRITICAL ERROR in createProjectFolder:', error);
+    console.error('❌ Error type:', typeof error);
+    console.error('❌ Error name:', error.name);
+    console.error('❌ Error message:', error.message);
+    console.error('❌ Error stack:', error.stack);
     throw error;
   }
 }
@@ -426,9 +446,21 @@ async function setFolderPermissions(folderId, accessToken) {
   });
 }
 
+// ИСПРАВЛЕННАЯ ФУНКЦИЯ sendMessage с timeout и улучшенной обработкой ошибок
 function sendMessage(chatId, text, options = {}) {
   return new Promise((resolve, reject) => {
     const botToken = process.env.BOT_TOKEN;
+    
+    // ПРОВЕРКА ПАРАМЕТРОВ
+    if (!botToken) {
+      reject(new Error('BOT_TOKEN is not set'));
+      return;
+    }
+    
+    if (!chatId || !text) {
+      reject(new Error('chatId and text are required'));
+      return;
+    }
     
     const postData = JSON.stringify({
       chat_id: chatId,
@@ -448,19 +480,41 @@ function sendMessage(chatId, text, options = {}) {
       }
     };
     
+    console.log(`📤 Sending message to chat ${chatId}:`, text.substring(0, 100) + '...');
+    
     const request = https.request(requestOptions, (response) => {
       let data = '';
       response.on('data', (chunk) => data += chunk);
       response.on('end', () => {
+        console.log(`📥 Telegram API response (${response.statusCode}):`, data.substring(0, 200));
         try {
-          resolve(JSON.parse(data));
+          const result = JSON.parse(data);
+          if (result.ok) {
+            console.log('✅ Message sent successfully');
+            resolve(result);
+          } else {
+            console.error('❌ Telegram API error:', result);
+            reject(new Error(`Telegram API error: ${result.description || 'Unknown error'}`));
+          }
         } catch (error) {
-          resolve({ ok: false, error: data });
+          console.error('❌ Failed to parse Telegram response:', error);
+          reject(new Error('Failed to parse Telegram response'));
         }
       });
     });
     
-    request.on('error', reject);
+    // КРИТИЧНО: TIMEOUT 8 СЕКУНД
+    request.setTimeout(8000, () => {
+      console.error('⏰ Telegram API request timeout');
+      request.destroy();
+      reject(new Error('Telegram API timeout'));
+    });
+    
+    request.on('error', (error) => {
+      console.error('❌ Telegram API request error:', error);
+      reject(error);
+    });
+    
     request.write(postData);
     request.end();
   });
@@ -495,6 +549,13 @@ function makeApiCall(method, params = {}) {
     });
     
     request.on('error', reject);
+    
+    // TIMEOUT для makeApiCall
+    request.setTimeout(5000, () => {
+      request.destroy();
+      reject(new Error('API call timeout'));
+    });
+    
     request.write(postData);
     request.end();
   });
@@ -503,6 +564,15 @@ function makeApiCall(method, params = {}) {
 async function initializeGoogleSheets() {
   try {
     console.log('🔧 === INITIALIZING GOOGLE SHEETS ===');
+    
+    // ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+    if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not set');
+    }
+    
+    if (!process.env.GOOGLE_SHEET_ID) {
+      throw new Error('GOOGLE_SHEET_ID is not set');
+    }
     
     const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
     console.log('✅ Service account key parsed');
@@ -558,6 +628,15 @@ async function addRowToSheet(answers, driveFolder) {
     console.log('📊 === STARTING addRowToSheet ===');
     console.log('📝 Input answers array:', answers);
     console.log('📁 Input driveFolder URL:', driveFolder ? driveFolder.folderUrl : 'NULL');
+    
+    // ПРОВЕРКА ВХОДНЫХ ПАРАМЕТРОВ
+    if (!answers || !Array.isArray(answers)) {
+      throw new Error('Invalid answers array');
+    }
+    
+    if (answers.length !== questions.length) {
+      console.warn(`⚠️ Expected ${questions.length} answers, got ${answers.length}`);
+    }
     
     const sheet = await initializeGoogleSheets();
     console.log('✅ Google Sheets connection established');
@@ -676,14 +755,19 @@ I help collect information about completed renovation projects for content creat
   await sendMessage(chatId, welcomeText, createMainMenu());
 }
 
-// ИСПРАВЛЕННАЯ ФУНКЦИЯ processCompletedSurvey
+// ФИНАЛЬНАЯ ИСПРАВЛЕННАЯ ФУНКЦИЯ processCompletedSurvey
 async function processCompletedSurvey(chatId, userId, answers) {
   try {
     console.log('🎯 === STARTING processCompletedSurvey ===');
     console.log('✅ Survey completed, answers:', answers);
     
+    // ПРОВЕРКА ВХОДНЫХ ПАРАМЕТРОВ
+    if (!chatId || !userId || !answers) {
+      throw new Error('Missing required parameters');
+    }
+    
     // Отправляем подтверждение
-    await sendMessage(chatId, "✅ *Survey completed!*\n\nCreating project folder...");
+    await sendMessage(chatId, "✅ Survey completed!\n\nCreating project folder...");
     
     // Создаем Google Drive папку
     console.log('📁 Step 1: Starting createProjectFolder...');
@@ -717,13 +801,20 @@ async function processCompletedSurvey(chatId, userId, answers) {
       console.log('⚠️ Step 3 skipped: No admin chat ID configured');
     }
     
-    // ФИНАЛЬНОЕ СООБЩЕНИЕ
+    // ИСПРАВЛЕННОЕ ФИНАЛЬНОЕ СООБЩЕНИЕ - БЕЗ MARKDOWN КОНФЛИКТОВ
     console.log('💬 Step 4: Sending final confirmation...');
-    const confirmationMessage = `🎉 *Project successfully processed!*
+    
+    const confirmationMessage = `✅ Project successfully processed!
 
-📁 **Folder:** ${driveFolder.folderName}
+📁 Folder: ${driveFolder.folderName}
 
-🔗 **Link:** ${driveFolder.folderUrl}
+📤 Please upload your project files to the appropriate folders:
+• Before photos → Before folder
+• After photos → After folder  
+• 3D renderings → 3D Visualization folder
+• Floor plans → Floor Plans folder
+
+🔗 ${driveFolder.folderUrl}
 
 Use /start for main menu`;
 
@@ -743,8 +834,14 @@ Use /start for main menu`;
   } catch (error) {
     console.error('❌ CRITICAL ERROR in processCompletedSurvey:', error);
     console.error('❌ Error stack:', error.stack);
-    await sendMessage(chatId, '❌ Error processing survey. Please try again later.');
-    await deleteSession(userId);
+    
+    // Очищаем сессию и уведомляем пользователя
+    try {
+      await deleteSession(userId);
+      await sendMessage(chatId, `❌ Error processing survey: ${error.message}`);
+    } catch (cleanupError) {
+      console.error('❌ Error during cleanup:', cleanupError);
+    }
   }
 }
 
@@ -752,6 +849,11 @@ Use /start for main menu`;
 async function createProjectFileAsync(answers, driveFolder) {
   try {
     console.log('📝 === ASYNC FILE CREATION START ===');
+    
+    // ПРОВЕРКА ПАРАМЕТРОВ
+    if (!answers || !driveFolder || !driveFolder.folderId || !driveFolder.token) {
+      throw new Error('Missing required parameters for file creation');
+    }
     
     const fullFileContent = generateProjectFileContent(answers, driveFolder);
     const fileName = `${answers[0] || 'Project'} - Project Brief.txt`;
@@ -767,6 +869,7 @@ async function createProjectFileAsync(answers, driveFolder) {
     
   } catch (error) {
     console.error('❌ Async file creation failed:', error);
+    // Не критично - основной функционал работает
   }
 }
 
@@ -780,6 +883,17 @@ export default async function handler(req, res) {
   try {
     const botToken = process.env.BOT_TOKEN;
     const update = req.body;
+    
+    // ПРОВЕРКА ДАННЫХ
+    if (!botToken) {
+      console.error('❌ BOT_TOKEN is not set');
+      return res.status(500).json({ error: 'BOT_TOKEN is not set' });
+    }
+    
+    if (!update) {
+      console.error('❌ No update data received');
+      return res.status(400).json({ error: 'No update data' });
+    }
     
     // Handle callback queries (inline button presses)
     if (update.callback_query) {
@@ -838,6 +952,7 @@ export default async function handler(req, res) {
 - Automatic Google Drive folder creation
 - Project Brief text file
 - Data saved to Google Sheets
+- Upload instructions provided
 
 Use /start anytime to return to the main menu.`;
         
@@ -936,8 +1051,9 @@ Use /start to see the main menu with all options.
 - /cancel - Cancel current survey
 
 After completing the survey, you'll receive:
-- Google Drive folder link
+- Google Drive folder link with organized subfolders
 - Project Brief text file
+- Upload instructions for your content
 
 Need to go back to the main menu? Just type /start`;
       
