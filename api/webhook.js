@@ -44,7 +44,7 @@ const COLUMN_HEADERS = [
   'Work Done',
   'Materials',
   'Features',
-  'Drive Folder'
+  'Drive Link'
 ];
 
 // ✨ REDIS ФУНКЦИИ ДЛЯ СЕССИЙ
@@ -88,7 +88,145 @@ async function deleteSession(userId) {
   }
 }
 
-// 🗂️ ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ GOOGLE DRIVE ФУНКЦИЙ
+// 📝 ПРОСТАЯ ФУНКЦИЯ ДЛЯ СОЗДАНИЯ СОДЕРЖИМОГО ФАЙЛА
+
+function generateProjectFileContent(answers, driveFolder) {
+  const date = new Date().toLocaleDateString('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    year: 'numeric'
+  });
+  
+  return `RENOVATION PROJECT BRIEF
+========================
+
+📅 PROJECT DATE: ${date}
+👤 CLIENT: ${answers[0] || 'Not specified'}
+🏗️ ROOM TYPE: ${answers[1] || 'Not specified'}
+📍 LOCATION: ${answers[2] || 'Not specified'}
+
+PROJECT OVERVIEW
+================
+🌟 CLIENT'S GOAL:
+${answers[3] || 'Not specified'}
+
+💪 WORK COMPLETED:
+${answers[4] || 'Not specified'}
+
+🧱 MATERIALS USED:
+${answers[5] || 'Not specified'}
+
+✨ SPECIAL FEATURES:
+${answers[6] || 'Not specified'}
+
+FOLDER STRUCTURE
+===============
+📁 Before Photos - Original condition images
+📁 After Photos - Completed project showcase  
+📁 3D Visualization - Renderings and design concepts
+📁 Floor Plans - Technical drawings and layouts
+
+CONTENT IDEAS
+============
+🎬 VIDEO TITLE SUGGESTIONS:
+- "Amazing ${answers[1] || 'Room'} Transformation in ${answers[2] || 'Location'}!"
+- "From Outdated to Outstanding: Complete ${answers[1] || 'Room'} Renovation"
+- "Modern Design Meets Functionality: ${answers[1] || 'Room'} Renovation Reveal"
+
+📝 SOCIAL MEDIA CAPTION:
+"Just completed this stunning ${answers[1]?.toLowerCase() || 'room'} renovation for our client ${answers[0] || 'our client'} in ${answers[2] || 'location'}! 
+
+✨ Client Goals: ${answers[3] || 'Transform the space'}
+💎 Key highlights: ${answers[6] || 'Amazing transformation achieved'}
+
+Swipe to see the incredible before & after transformation! 
+
+#renovation #${answers[1]?.toLowerCase().replace(/\s+/g, '') || 'renovation'} #beforeandafter #interiordesign"
+
+📊 PROJECT INFORMATION
+=====================
+• Project Folder: ${driveFolder ? driveFolder.folderUrl : 'Not available'}
+• Generated: ${new Date().toLocaleString('en-US')}
+• Created by: Renovation Bot v1.0
+
+=== END OF PROJECT BRIEF ===`;
+}
+
+// Функция для создания файла в Google Drive
+async function createProjectFile(folderId, fileName, content, accessToken) {
+  return new Promise((resolve, reject) => {
+    console.log(`📝 Creating file: ${fileName} in folder: ${folderId}`);
+    
+    // Создаем метаданные файла
+    const metadata = {
+      name: fileName,
+      parents: [folderId],
+      mimeType: 'text/plain'
+    };
+    
+    // Создаем multipart данные
+    const boundary = '-------314159265358979323846';
+    const delimiter = "\r\n--" + boundary + "\r\n";
+    const close_delim = "\r\n--" + boundary + "--";
+    
+    const multipartRequestBody = 
+      delimiter +
+      'Content-Type: application/json\r\n\r\n' +
+      JSON.stringify(metadata) +
+      delimiter +
+      'Content-Type: text/plain\r\n\r\n' +
+      content +
+      close_delim;
+    
+    const options = {
+      hostname: 'www.googleapis.com',
+      port: 443,
+      path: '/upload/drive/v3/files?uploadType=multipart',
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': `multipart/related; boundary="${boundary}"`,
+        'Content-Length': Buffer.byteLength(multipartRequestBody)
+      }
+    };
+    
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        console.log(`📥 File creation response (${res.statusCode}):`, data.substring(0, 200));
+        
+        if (res.statusCode === 200) {
+          try {
+            const result = JSON.parse(data);
+            console.log(`✅ File created successfully: ${result.id}`);
+            resolve(result);
+          } catch (parseError) {
+            reject(new Error(`File creation JSON parse error: ${parseError.message}`));
+          }
+        } else {
+          reject(new Error(`Drive API file creation error: ${res.statusCode} - ${data}`));
+        }
+      });
+    });
+    
+    req.on('error', (error) => {
+      console.error('❌ File creation request error:', error);
+      reject(error);
+    });
+    
+    req.setTimeout(10000, () => {
+      console.error('⏰ File creation timeout');
+      req.destroy();
+      reject(new Error('File creation timeout'));
+    });
+    
+    req.write(multipartRequestBody);
+    req.end();
+  });
+}
+
+// 🗂️ GOOGLE DRIVE ФУНКЦИИ
 
 async function createProjectFolder(clientName, roomType, location) {
   try {
@@ -182,11 +320,12 @@ async function createProjectFolder(clientName, roomType, location) {
       folderId: mainFolder.id,
       folderName: folderName,
       folderUrl: folderUrl,
-      subfolders: createdSubfolders
+      subfolders: createdSubfolders,
+      token: token.token // Добавляем токен для создания файла
     };
     
     console.log('🎯 === createProjectFolder FINISHED SUCCESSFULLY ===');
-    console.log('📊 Final result:', JSON.stringify(result, null, 2));
+    console.log('📊 Final result:', JSON.stringify({...result, token: '[HIDDEN]'}, null, 2));
     
     return result;
     
@@ -385,45 +524,71 @@ function makeApiCall(method, params = {}) {
 
 async function initializeGoogleSheets() {
   try {
+    console.log('🔧 === INITIALIZING GOOGLE SHEETS ===');
+    
     const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    console.log('✅ Service account key parsed');
     
     const serviceAccountAuth = new JWT({
       email: serviceAccountKey.client_email,
       key: serviceAccountKey.private_key,
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
+    console.log('✅ JWT auth created');
 
     const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
     await doc.loadInfo();
-    
-    console.log(`Connected to Google Sheet: ${doc.title}`);
+    console.log(`✅ Connected to Google Sheet: ${doc.title}`);
     
     let sheet = doc.sheetsByIndex[0];
     if (!sheet) {
       sheet = await doc.addSheet({ title: 'Renovation Projects' });
-      console.log('Created new sheet: Renovation Projects');
+      console.log('✅ Created new sheet: Renovation Projects');
     }
     
+    // Загружаем заголовки
     await sheet.loadHeaderRow();
+    console.log('📋 Current sheet headers:', sheet.headerValues);
     
+    // Проверяем и устанавливаем правильные заголовки
     if (!sheet.headerValues || sheet.headerValues.length === 0) {
+      console.log('🔧 Setting headers for the first time...');
       await sheet.setHeaderRow(COLUMN_HEADERS);
-      console.log('Added headers to Google Sheet');
+      console.log('✅ Headers set successfully');
+      
+      // Перезагружаем заголовки после установки
+      await sheet.loadHeaderRow();
+      console.log('📋 Final headers:', sheet.headerValues);
+    } else {
+      console.log('✅ Headers already exist:', sheet.headerValues);
     }
     
+    console.log('🔧 === GOOGLE SHEETS INITIALIZATION COMPLETE ===');
     return sheet;
+    
   } catch (error) {
-    console.error('Error initializing Google Sheets:', error);
+    console.error('❌ Error initializing Google Sheets:', error);
+    console.error('❌ Sheet ID:', process.env.GOOGLE_SHEET_ID);
+    console.error('❌ Error details:', error.message);
     throw error;
   }
 }
 
 async function addRowToSheet(answers, driveFolder) {
   try {
-    console.log('Attempting to add row to Google Sheets...');
-    const sheet = await initializeGoogleSheets();
+    console.log('📊 === STARTING addRowToSheet ===');
+    console.log('📝 Input answers array:', answers);
+    console.log('📁 Input driveFolder:', driveFolder);
     
-    const newRow = {
+    const sheet = await initializeGoogleSheets();
+    console.log('✅ Google Sheets connection established');
+    
+    // Убеждаемся, что заголовки загружены
+    await sheet.loadHeaderRow();
+    console.log('📋 Sheet headers:', sheet.headerValues);
+    
+    // Создаем объект данных для новой строки
+    const rowData = {
       'Date': new Date().toLocaleDateString('en-US'),
       'Client Name': answers[0] || 'Not specified',
       'Room Type': answers[1] || 'Not specified',
@@ -432,18 +597,26 @@ async function addRowToSheet(answers, driveFolder) {
       'Work Done': answers[4] || 'Not specified',
       'Materials': answers[5] || 'Not specified',
       'Features': answers[6] || 'Not specified',
-      'Drive Folder': driveFolder ? driveFolder.folderUrl : 'Not created'
+      'Drive Link': driveFolder ? driveFolder.folderUrl : 'Not created'
     };
     
-    console.log('Adding row:', newRow);
+    console.log('📋 Row data prepared:');
+    console.log(JSON.stringify(rowData, null, 2));
     
-    await sheet.addRow(newRow);
+    // Добавляем строку в таблицу
+    console.log('➕ Adding row to sheet...');
+    const addedRow = await sheet.addRow(rowData);
+    console.log('✅ Row added successfully! Row number:', addedRow._rowNumber);
     
-    console.log('Row added to Google Sheets successfully');
+    console.log('📊 === addRowToSheet FINISHED SUCCESSFULLY ===');
     return true;
+    
   } catch (error) {
-    console.error('Error adding row to sheet:', error);
-    console.error('Error details:', error.message);
+    console.error('❌ CRITICAL ERROR in addRowToSheet:', error);
+    console.error('❌ Error type:', typeof error);
+    console.error('❌ Error name:', error.name);
+    console.error('❌ Error message:', error.message);
+    console.error('❌ Full error stack:', error.stack);
     throw error;
   }
 }
@@ -480,7 +653,7 @@ async function setupBotCommands() {
 }
 
 function createAdminNotification(answers, driveFolder) {
-  return `
+  let notification = `
 📢 New Project Submitted!
 👤 Client: ${answers[0] || 'Not specified'}
 🏗️ Room: ${answers[1] || 'Not specified'}
@@ -489,8 +662,14 @@ function createAdminNotification(answers, driveFolder) {
 💪 Work done: ${answers[4] || 'Not specified'}
 🧱 Materials: ${answers[5] || 'Not specified'}
 ✨ Features: ${answers[6] || 'Not specified'}
-📁 Folder: ${driveFolder ? driveFolder.folderUrl : 'Not created'}
-  `.trim();
+📁 Folder: ${driveFolder ? driveFolder.folderUrl : 'Not created'}`;
+
+  // Добавляем ссылку на файл проекта если создан
+  if (driveFolder && driveFolder.projectFile) {
+    notification += `\n📝 Project Brief: ${driveFolder.projectFile.url}`;
+  }
+
+  return notification.trim();
 }
 
 function createMainMenu() {
@@ -521,11 +700,11 @@ I help collect information about completed renovation projects for content creat
   await sendMessage(chatId, welcomeText, createMainMenu());
 }
 
-// 🎯 ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ processCompletedSurvey
+// 🎯 ИСПРАВЛЕННАЯ ВЕРСИЯ processCompletedSurvey - БЕЗ ЗАВИСАНИЯ
 
 async function processCompletedSurvey(chatId, userId, answers) {
   try {
-    console.log('🎯 === STARTING processCompletedSurvey ===');
+    console.log('🎯 === STARTING processCompletedSurvey (FIXED VERSION) ===');
     console.log('✅ Survey completed, answers:', answers);
     
     // Send summary
@@ -542,28 +721,29 @@ async function processCompletedSurvey(chatId, userId, answers) {
 🧱 Materials: ${answers[5]}
 ✨ Features: ${answers[6]}
 
-Creating Google Drive folder and saving data...
-    `;
+Creating Google Drive folder...`;
     
     await sendMessage(chatId, summaryMessage);
     console.log('✅ Step 1 completed: Summary message sent');
     
+    // Отправляем сообщение о процессе сразу
+    await sendMessage(chatId, "⏳ Creating folder and saving data...");
+    
     try {
       // Создаем Google Drive папку
       console.log('📁 Step 2: Starting createProjectFolder...');
-      console.log('📁 Calling createProjectFolder with:');
-      console.log(`   Client: "${answers[0] || 'Unknown Client'}"`);
-      console.log(`   Room: "${answers[1] || 'Unknown Room'}"`);
-      console.log(`   Location: "${answers[2] || 'Unknown Location'}"`);
-      
       const driveFolder = await createProjectFolder(
         answers[0] || 'Unknown Client',
         answers[1] || 'Unknown Room', 
         answers[2] || 'Unknown Location'
       );
+      console.log('✅ Step 2 completed: Drive folder created');
       
-      console.log('✅ Step 2 completed: createProjectFolder returned');
-      console.log('📂 Drive folder result:', JSON.stringify(driveFolder, null, 2));
+      // Создаем файл проекта АСИНХРОННО (не блокируем основной поток)
+      console.log('📝 Step 2.5: Creating project file asynchronously...');
+      createProjectFileAsync(answers, driveFolder).catch(err => {
+        console.error('❌ Async file creation error (non-blocking):', err);
+      });
       
       // Save to Google Sheets
       console.log('📊 Step 3: Starting addRowToSheet...');
@@ -574,7 +754,6 @@ Creating Google Drive folder and saving data...
       console.log('👤 Step 4: Sending admin notification...');
       const adminChatId = process.env.ADMIN_CHAT_ID;
       if (adminChatId) {
-        console.log(`📧 Admin chat ID: ${adminChatId}`);
         const notificationText = createAdminNotification(answers, driveFolder);
         await sendMessage(adminChatId, notificationText);
         console.log('✅ Step 4 completed: Admin notification sent');
@@ -582,26 +761,21 @@ Creating Google Drive folder and saving data...
         console.log('⚠️ Step 4 skipped: No admin chat ID configured');
       }
       
-      // Confirmation with Drive folder link
+      // КОРОТКОЕ ФИНАЛЬНОЕ СООБЩЕНИЕ
       console.log('💬 Step 5: Sending final confirmation...');
-      await sendMessage(chatId, `🎉 *Project data successfully processed!*
+      const confirmationMessage = `🎉 *Project successfully processed!*
 
 ✅ Data saved to Google Sheets
-📁 Google Drive folder created: **${driveFolder.folderName}**
+📁 Google Drive folder created
 
-🔗 **Folder Link:** ${driveFolder.folderUrl}
+🔗 **Folder:** ${driveFolder.folderUrl}
 
-**Folder Structure:**
-📁 ${driveFolder.folderName}
-├── 📁 Before
-├── 📁 After  
-├── 📁 3D Visualization
-└── 📁 Floor Plans
+**Structure:**
+📁 Before | 📁 After | 📁 3D | 📁 Plans
 
-Upload your project files to the appropriate folders!
+Use /start for main menu`;
 
-• Use /start to return to main menu
-• Use "🚀 Start New Survey" to submit another project`, {
+      await sendMessage(chatId, confirmationMessage, {
         reply_markup: { remove_keyboard: true }
       });
       
@@ -611,9 +785,8 @@ Upload your project files to the appropriate folders!
       console.error('❌ ERROR in Steps 2-5:', error);
       console.error('❌ Error name:', error.name);
       console.error('❌ Error message:', error.message);
-      console.error('❌ Error stack:', error.stack);
       
-      await sendMessage(chatId, `❌ Error processing project data: ${error.message}\n\nPlease contact support or try again later.`);
+      await sendMessage(chatId, `❌ Error: ${error.message}. Please try again later.`);
     }
     
     // Удаляем сессию из Redis
@@ -625,8 +798,33 @@ Upload your project files to the appropriate folders!
     
   } catch (error) {
     console.error('❌ CRITICAL ERROR in processCompletedSurvey:', error);
-    console.error('❌ Critical error stack:', error.stack);
+    console.log('📤 Sending error message to user...');
     await sendMessage(chatId, '❌ Error processing survey. Please try again later.');
+  }
+}
+
+// Асинхронная функция создания файла (не блокирует основной поток)
+async function createProjectFileAsync(answers, driveFolder) {
+  try {
+    console.log('📝 === ASYNC FILE CREATION START ===');
+    
+    const fullFileContent = generateProjectFileContent(answers, driveFolder);
+    const fileName = `${answers[0] || 'Project'} - Project Brief.txt`;
+    
+    const projectFile = await createProjectFile(
+      driveFolder.folderId,
+      fileName,
+      fullFileContent,
+      driveFolder.token
+    );
+    
+    console.log('✅ Async file creation completed:', projectFile.id);
+    
+    // Можно добавить дополнительную логику, например, обновить уведомление админу
+    
+  } catch (error) {
+    console.error('❌ Async file creation failed:', error);
+    // Не критично - основной функционал работает
   }
 }
 
@@ -692,24 +890,19 @@ export default async function handler(req, res) {
 1️⃣ Click "🚀 Start New Survey"
 2️⃣ Answer 7 questions about your project
 3️⃣ Skip questions with "⏭️" button if needed
-4️⃣ Get summary and Google Drive folder link
+4️⃣ Get Google Drive folder with project files
 
 *Questions Asked:*
-- Client name
-- Room type (kitchen, bathroom, etc.)
-- Location (city, state)
-- Client's goals
-- Work completed
-- Materials used
-- Special features
+- Client name, Room type, Location
+- Client's goals, Work completed
+- Materials used, Special features
 
 *After completion:*
 - Automatic Google Drive folder creation
-- Folder with 4 subfolders (Before, After, 3D, Floor Plans)
-- Shareable link for file uploads
+- Project Brief text file
+- Data saved to Google Sheets
 
-Use /start anytime to return to the main menu.
-        `;
+Use /start anytime to return to the main menu.`;
         
         await sendMessage(chatId, helpText);
         
@@ -718,30 +911,21 @@ Use /start anytime to return to the main menu.
 *📊 About Renovation Project Bot*
 
 *Purpose:*
-This bot streamlines the collection of renovation project information for business use.
+Streamline renovation project data collection for business use.
 
-*Data Collection:*
-- 🏠 Project details (client, location, room)
-- 🔧 Work scope and materials
-- ✨ Special features and solutions
-
-*Automation:*
-- 📁 Automatic Google Drive folder creation
-- 📊 Data saved to Google Sheets
+*Features:*
+- 📁 Automatic Google Drive folders
+- 📊 Google Sheets data storage
+- 📝 Project Brief files
 - 🔗 Instant shareable links
 
 *Business Benefits:*
-- 📝 Content creation for marketing
-- 📊 CRM and database management
-- 🎬 Video script generation
-- 📈 Project analytics and reporting
-- 🗂️ Organized file management
+- Content creation for marketing
+- CRM and database management
+- Project analytics and reporting
+- Organized file management
 
-*Security:*
-All data is processed securely and sent directly to project administrators.
-
-Ready to submit a project? Use /start to return to the main menu.
-        `;
+Ready to submit a project? Use /start to begin.`;
         
         await sendMessage(chatId, aboutText);
       }
@@ -819,12 +1003,11 @@ Use /start to see the main menu with all options.
 - /survey - Start survey directly
 - /cancel - Cancel current survey
 
-During surveys, you can skip questions using the "Skip this question ⏭️" button.
+After completing the survey, you'll receive:
+- Google Drive folder link
+- Project Brief text file
 
-After completing the survey, you'll receive a Google Drive folder link for uploading project files.
-
-Need to go back to the main menu? Just type /start
-      `;
+Need to go back to the main menu? Just type /start`;
       
       await sendMessage(chatId, helpText);
       return res.status(200).json({ ok: true });
