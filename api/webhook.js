@@ -34,7 +34,7 @@ const questions = [
   "✨ Were there any interesting features or smart solutions implemented? (e.g. round lighting, hidden drawers, custom panels)"
 ];
 
-// Column headers for Google Sheets
+// ИСПРАВЛЕННЫЕ Column headers for Google Sheets
 const COLUMN_HEADERS = [
   'Date',
   'Client Name',
@@ -44,7 +44,7 @@ const COLUMN_HEADERS = [
   'Work Done',
   'Materials',
   'Features',
-  'Drive Link'
+  'Drive Folder'  // ИСПРАВЛЕНО: было 'Drive Link'
 ];
 
 // ✨ REDIS ФУНКЦИИ ДЛЯ СЕССИЙ
@@ -88,7 +88,7 @@ async function deleteSession(userId) {
   }
 }
 
-// 📝 ОЧИЩЕННАЯ ФУНКЦИЯ ДЛЯ СОЗДАНИЯ СОДЕРЖИМОГО ФАЙЛА
+// 📝 ФУНКЦИЯ ДЛЯ СОЗДАНИЯ СОДЕРЖИМОГО ФАЙЛА
 
 function generateProjectFileContent(answers, driveFolder) {
   const date = new Date().toLocaleDateString('en-US', {
@@ -208,7 +208,7 @@ async function createProjectFile(folderId, fileName, content, accessToken) {
   });
 }
 
-// 🗂️ ИСПРАВЛЕННЫЕ GOOGLE DRIVE ФУНКЦИИ
+// 🗂️ GOOGLE DRIVE ФУНКЦИИ
 
 async function createProjectFolder(clientName, roomType, location) {
   try {
@@ -282,7 +282,7 @@ async function createProjectFolder(clientName, roomType, location) {
     
     console.log('✅ Step F: All subfolders processing completed');
     
-    // ИСПРАВЛЕННЫЕ ПРАВА ДОСТУПА
+    // Устанавливаем права доступа
     console.log('🔐 Step G: Setting folder permissions...');
     try {
       await setFolderPermissions(mainFolder.id, token.token);
@@ -292,7 +292,7 @@ async function createProjectFolder(clientName, roomType, location) {
       console.log('⚠️ Step G: Continuing without public permissions...');
     }
     
-    // ИСПРАВЛЕННАЯ ССЫЛКА - используем правильный формат
+    // Создаем правильную ссылку
     console.log('🔗 Step H: Creating folder URL...');
     const folderUrl = `https://drive.google.com/drive/folders/${mainFolder.id}?usp=sharing`;
     console.log(`✅ Step H: Folder URL: ${folderUrl}`);
@@ -552,7 +552,7 @@ async function initializeGoogleSheets() {
   }
 }
 
-// ИСПРАВЛЕННАЯ ФУНКЦИЯ addRowToSheet с лучшим логированием
+// ИСПРАВЛЕННАЯ ФУНКЦИЯ addRowToSheet
 async function addRowToSheet(answers, driveFolder) {
   try {
     console.log('📊 === STARTING addRowToSheet ===');
@@ -566,7 +566,7 @@ async function addRowToSheet(answers, driveFolder) {
     await sheet.loadHeaderRow();
     console.log('📋 Sheet headers:', sheet.headerValues);
     
-    // Создаем объект данных для новой строки
+    // ИСПРАВЛЕНО: Используем 'Drive Folder' как в заголовках
     const rowData = {
       'Date': new Date().toLocaleDateString('en-US'),
       'Client Name': answers[0] || 'Not specified',
@@ -576,25 +576,25 @@ async function addRowToSheet(answers, driveFolder) {
       'Work Done': answers[4] || 'Not specified',
       'Materials': answers[5] || 'Not specified',
       'Features': answers[6] || 'Not specified',
-      'Drive Link': driveFolder && driveFolder.folderUrl ? driveFolder.folderUrl : 'Not created'
+      'Drive Folder': driveFolder && driveFolder.folderUrl ? driveFolder.folderUrl : 'Not created'
     };
     
     console.log('📋 Row data prepared:');
-    console.log('🔗 Drive Link being saved:', rowData['Drive Link']);
+    console.log('🔗 Drive Folder being saved:', rowData['Drive Folder']);
     
     // Добавляем строку в таблицу
     console.log('➕ Adding row to sheet...');
     const addedRow = await sheet.addRow(rowData);
     console.log('✅ Row added successfully! Row number:', addedRow._rowNumber);
     
-    // ПРОВЕРЯЕМ ЧТО ССЫЛКА СОХРАНИЛАСЬ
-    const savedDriveLink = addedRow.get('Drive Link');
-    console.log('🔍 Verification - saved Drive Link:', savedDriveLink);
+    // ИСПРАВЛЕННАЯ ПРОВЕРКА
+    const savedDriveFolder = addedRow.get('Drive Folder');
+    console.log('🔍 Verification - saved Drive Folder:', savedDriveFolder);
     
-    if (!savedDriveLink || savedDriveLink === 'Not created') {
-      console.error('❌ WARNING: Drive Link was not saved properly!');
+    if (!savedDriveFolder || savedDriveFolder === 'Not created') {
+      console.error('❌ WARNING: Drive Folder was not saved properly!');
     } else {
-      console.log('✅ Drive Link verified in Google Sheets');
+      console.log('✅ Drive Folder verified in Google Sheets');
     }
     
     console.log('📊 === addRowToSheet FINISHED SUCCESSFULLY ===');
@@ -676,68 +676,62 @@ I help collect information about completed renovation projects for content creat
   await sendMessage(chatId, welcomeText, createMainMenu());
 }
 
-// 🎯 ОЧИЩЕННАЯ ВЕРСИЯ processCompletedSurvey 
-
+// ИСПРАВЛЕННАЯ ФУНКЦИЯ processCompletedSurvey
 async function processCompletedSurvey(chatId, userId, answers) {
   try {
-    console.log('🎯 === STARTING processCompletedSurvey (CLEAN VERSION) ===');
+    console.log('🎯 === STARTING processCompletedSurvey ===');
     console.log('✅ Survey completed, answers:', answers);
     
-    // УБРАНО: детальное сообщение с информацией о проекте
-    // Отправляем только короткое подтверждение
+    // Отправляем подтверждение
     await sendMessage(chatId, "✅ *Survey completed!*\n\nCreating project folder...");
     
-    try {
-      // Создаем Google Drive папку
-      console.log('📁 Step 1: Starting createProjectFolder...');
-      const driveFolder = await createProjectFolder(
-        answers[0] || 'Unknown Client',
-        answers[1] || 'Unknown Room', 
-        answers[2] || 'Unknown Location'
-      );
-      console.log('✅ Step 1 completed: Drive folder created');
-      console.log('🔗 Folder URL created:', driveFolder.folderUrl);
-      
-      // Создаем файл проекта АСИНХРОННО
-      console.log('📝 Step 1.5: Creating project file asynchronously...');
-      createProjectFileAsync(answers, driveFolder).catch(err => {
-        console.error('❌ Async file creation error (non-blocking):', err);
-      });
-      
-      // Save to Google Sheets
-      console.log('📊 Step 2: Starting addRowToSheet...');
-      await addRowToSheet(answers, driveFolder);
-      console.log('✅ Step 2 completed: addRowToSheet finished');
-      
-      // Send notification to admin
-      console.log('👤 Step 3: Sending admin notification...');
-      const adminChatId = process.env.ADMIN_CHAT_ID;
-      if (adminChatId) {
-        const notificationText = createAdminNotification(answers, driveFolder);
-        await sendMessage(adminChatId, notificationText);
-        console.log('✅ Step 3 completed: Admin notification sent');
-      }
-      
-      // КОРОТКОЕ ФИНАЛЬНОЕ СООБЩЕНИЕ БЕЗ ДЕТАЛЬНОЙ ИНФОРМАЦИИ
-      console.log('💬 Step 4: Sending final confirmation...');
-      const confirmationMessage = `🎉 *Project successfully processed!*
+    // Создаем Google Drive папку
+    console.log('📁 Step 1: Starting createProjectFolder...');
+    const driveFolder = await createProjectFolder(
+      answers[0] || 'Unknown Client',
+      answers[1] || 'Unknown Room', 
+      answers[2] || 'Unknown Location'
+    );
+    console.log('✅ Step 1 completed: Drive folder created');
+    console.log('🔗 Folder URL created:', driveFolder.folderUrl);
+    
+    // Создаем файл проекта АСИНХРОННО
+    console.log('📝 Step 1.5: Creating project file asynchronously...');
+    createProjectFileAsync(answers, driveFolder).catch(err => {
+      console.error('❌ Async file creation error (non-blocking):', err);
+    });
+    
+    // Save to Google Sheets
+    console.log('📊 Step 2: Starting addRowToSheet...');
+    await addRowToSheet(answers, driveFolder);
+    console.log('✅ Step 2 completed: addRowToSheet finished');
+    
+    // Send notification to admin
+    console.log('👤 Step 3: Sending admin notification...');
+    const adminChatId = process.env.ADMIN_CHAT_ID;
+    if (adminChatId) {
+      const notificationText = createAdminNotification(answers, driveFolder);
+      await sendMessage(adminChatId, notificationText);
+      console.log('✅ Step 3 completed: Admin notification sent');
+    } else {
+      console.log('⚠️ Step 3 skipped: No admin chat ID configured');
+    }
+    
+    // ФИНАЛЬНОЕ СООБЩЕНИЕ
+    console.log('💬 Step 4: Sending final confirmation...');
+    const confirmationMessage = `🎉 *Project successfully processed!*
 
-📁 **Folder created:** ${driveFolder.folderName}
+📁 **Folder:** ${driveFolder.folderName}
 
 🔗 **Link:** ${driveFolder.folderUrl}
 
 Use /start for main menu`;
 
-      await sendMessage(chatId, confirmationMessage, {
-        reply_markup: { remove_keyboard: true }
-      });
-      
-      console.log('✅ Step 4 completed: Final confirmation sent');
-      
-    } catch (error) {
-      console.error('❌ ERROR in processing steps:', error);
-      await sendMessage(chatId, `❌ Error: ${error.message}. Please try again later.`);
-    }
+    await sendMessage(chatId, confirmationMessage, {
+      reply_markup: { remove_keyboard: true }
+    });
+    
+    console.log('✅ Step 4 completed: Final confirmation sent');
     
     // Удаляем сессию из Redis
     console.log('🗑️ Step 5: Deleting Redis session...');
@@ -748,7 +742,9 @@ Use /start for main menu`;
     
   } catch (error) {
     console.error('❌ CRITICAL ERROR in processCompletedSurvey:', error);
+    console.error('❌ Error stack:', error.stack);
     await sendMessage(chatId, '❌ Error processing survey. Please try again later.');
+    await deleteSession(userId);
   }
 }
 
