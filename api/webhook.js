@@ -1,9 +1,13 @@
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
+import { Redis } from '@upstash/redis';
 import https from 'https';
 
-// Store user sessions in memory (for production use database)
-const userSessions = {};
+// Инициализация Redis
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
 
 // Авторизованные пользователи
 const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ? 
@@ -11,10 +15,11 @@ const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ?
   [];
 
 console.log('✅ Authorized users loaded:', AUTHORIZED_USERS.length);
+console.log('🔴 Redis initialized');
 
 // Функция проверки авторизации
 function isUserAuthorized(userId) {
-  if (AUTHORIZED_USERS.length === 0) return true; // Если список пуст - разрешить всем
+  if (AUTHORIZED_USERS.length === 0) return true;
   return AUTHORIZED_USERS.includes(userId);
 }
 
@@ -42,6 +47,47 @@ const COLUMN_HEADERS = [
   'Features',
   'Drive Link'
 ];
+
+// ✨ REDIS ФУНКЦИИ ДЛЯ СЕССИЙ
+
+async function getSession(userId) {
+  try {
+    console.log(`🔍 Getting session for user ${userId}`);
+    const session = await redis.get(`session_${userId}`);
+    console.log(`📋 Session data:`, session);
+    return session;
+  } catch (error) {
+    console.error('❌ Error getting session:', error);
+    return null;
+  }
+}
+
+async function saveSession(userId, step, answers) {
+  try {
+    console.log(`💾 Saving session for user ${userId}, step ${step}`);
+    const sessionData = { step, answers, timestamp: Date.now() };
+    
+    // Сохраняем на 1 час (3600 секунд)
+    await redis.set(`session_${userId}`, sessionData, { ex: 3600 });
+    console.log(`✅ Session saved successfully`);
+    return true;
+  } catch (error) {
+    console.error('❌ Error saving session:', error);
+    return false;
+  }
+}
+
+async function deleteSession(userId) {
+  try {
+    console.log(`🗑️ Deleting session for user ${userId}`);
+    await redis.del(`session_${userId}`);
+    console.log(`✅ Session deleted successfully`);
+    return true;
+  } catch (error) {
+    console.error('❌ Error deleting session:', error);
+    return false;
+  }
+}
 
 function sendMessage(chatId, text, options = {}) {
   return new Promise((resolve, reject) => {
@@ -119,36 +165,28 @@ function makeApiCall(method, params = {}) {
 
 async function initializeGoogleSheets() {
   try {
-    // Parse service account credentials from environment variables
     const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
     
-    // Create JWT client for authentication
     const serviceAccountAuth = new JWT({
       email: serviceAccountKey.client_email,
       key: serviceAccountKey.private_key,
-      scopes: [
-        'https://www.googleapis.com/auth/spreadsheets',
-      ],
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
 
-    // Initialize document
     const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
     await doc.loadInfo();
     
     console.log(`Connected to Google Sheet: ${doc.title}`);
     
-    // Get first sheet or create new one if it doesn't exist
     let sheet = doc.sheetsByIndex[0];
     if (!sheet) {
       sheet = await doc.addSheet({ title: 'Renovation Projects' });
       console.log('Created new sheet: Renovation Projects');
     }
     
-    // Check if column headers are set
     await sheet.loadHeaderRow();
     
     if (!sheet.headerValues || sheet.headerValues.length === 0) {
-      // If table is empty, add headers
       await sheet.setHeaderRow(COLUMN_HEADERS);
       console.log('Added headers to Google Sheet');
     }
@@ -165,7 +203,6 @@ async function addRowToSheet(answers) {
     console.log('Attempting to add row to Google Sheets...');
     const sheet = await initializeGoogleSheets();
     
-    // Create new row with today's date and project data
     const newRow = {
       'Date': new Date().toLocaleDateString('en-US'),
       'Client Name': answers[0] || 'Not specified',
@@ -180,7 +217,6 @@ async function addRowToSheet(answers) {
     
     console.log('Adding row:', newRow);
     
-    // Add row to sheet
     await sheet.addRow(newRow);
     
     console.log('Row added to Google Sheets successfully');
@@ -200,7 +236,6 @@ async function setupBotCommands() {
   try {
     console.log('🔧 Setting up bot commands...');
     
-    // Set up bot commands menu
     await makeApiCall('setMyCommands', {
       commands: [
         {
@@ -225,7 +260,6 @@ async function setupBotCommands() {
     console.log('✅ Bot commands menu set up successfully');
   } catch (error) {
     console.error('❌ Error setting up bot commands:', error);
-    // НЕ ЛОМАЕМ бота, просто логируем ошибку
   }
 }
 
@@ -271,6 +305,71 @@ I help collect information about completed renovation projects for content creat
   await sendMessage(chatId, welcomeText, createMainMenu());
 }
 
+async function processCompletedSurvey(chatId, userId, answers) {
+  try {
+    console.log('✅ Survey completed, answers:', answers);
+    
+    // Validate Google Drive link if provided
+    if (answers[7] && answers[7] !== 'Not specified' && !validateDriveLink(answers[7])) {
+      await sendMessage(chatId, '❌ Please provide a valid Google Drive link. The link should contain "drive.google.com" or "docs.google.com".\n\nPlease send the Google Drive link again:');
+      
+      // Вернуть пользователя к последнему вопросу
+      await saveSession(userId, 7, answers.slice(0, 7));
+      return;
+    }
+    
+    // Send summary
+    const summaryMessage = `
+*✅ Project Survey Completed!*
+
+*Summary of submitted project:*
+👤 Client: ${answers[0]}
+🏗️ Room: ${answers[1]}
+📍 Location: ${answers[2]}
+🌟 Goal: ${answers[3]}
+💪 Work done: ${answers[4]}
+🧱 Materials: ${answers[5]}
+✨ Features: ${answers[6]}
+📂 Drive: ${answers[7]}
+
+Processing and saving your data...
+    `;
+    
+    await sendMessage(chatId, summaryMessage);
+    
+    try {
+      // Save to Google Sheets
+      console.log('Attempting to save to Google Sheets...');
+      await addRowToSheet(answers);
+      console.log('Successfully saved to Google Sheets');
+      
+      // Send notification to admin
+      const adminChatId = process.env.ADMIN_CHAT_ID;
+      if (adminChatId) {
+        const notificationText = createAdminNotification(answers);
+        await sendMessage(adminChatId, notificationText);
+        console.log('Admin notification sent');
+      }
+      
+      // Confirmation
+      await sendMessage(chatId, '🎉 *Project data successfully saved to Google Sheets!*\n\nThank you for your submission. The information has been sent to the project administrators and saved to our database.\n\n• Use /start to return to main menu\n• Use "🚀 Start New Survey" to submit another project', {
+        reply_markup: { remove_keyboard: true }
+      });
+      
+    } catch (error) {
+      console.error('Error saving to Google Sheets:', error);
+      await sendMessage(chatId, '❌ Error saving data to Google Sheets. The survey data has been recorded but there was an issue with the database.\n\nPlease contact support or try again later.\n\nError: ' + error.message);
+    }
+    
+    // Удаляем сессию из Redis
+    await deleteSession(userId);
+    
+  } catch (error) {
+    console.error('Error processing completed survey:', error);
+    await sendMessage(chatId, '❌ Error processing survey. Please try again later.');
+  }
+}
+
 export default async function handler(req, res) {
   console.log(`${new Date().toISOString()} - ${req.method} request received`);
   
@@ -308,7 +407,8 @@ export default async function handler(req, res) {
       });
       
       if (data === 'start_survey') {
-        userSessions[userId] = { step: 0, answers: [] };
+        // Создаем новую сессию в Redis
+        await saveSession(userId, 0, []);
         
         await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 8 questions about your completed renovation project. You can skip any question if needed.\n\nLet\'s begin!');
         
@@ -423,7 +523,8 @@ Ready to submit a project? Use /start to return to the main menu.
     
     // Handle /survey command - start survey directly
     if (text === '/survey') {
-      userSessions[userId] = { step: 0, answers: [] };
+      // Создаем новую сессию в Redis
+      await saveSession(userId, 0, []);
       
       await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 8 questions about your completed renovation project. You can skip any question if needed.\n\nLet\'s begin!');
       
@@ -460,102 +561,45 @@ Need to go back to the main menu? Just type /start
     
     // Handle /cancel command
     if (text === '/cancel') {
-      delete userSessions[userId];
+      await deleteSession(userId);
       await sendMessage(chatId, '❌ Survey cancelled.\n\nUse /start to return to the main menu.', {
         reply_markup: { remove_keyboard: true }
       });
       return res.status(200).json({ ok: true });
     }
     
-    // Handle survey responses
-    if (userSessions[userId]) {
-      const session = userSessions[userId];
+    // Handle survey responses - ИСПОЛЬЗУЕМ REDIS СЕССИИ
+    const session = await getSession(userId);
+    
+    if (session) {
+      console.log(`📋 Found Redis session: step ${session.step}`);
       
-      console.log(`Survey response from ${userId}, step ${session.step}: ${text}`);
-      
-      // Save answer
+      // Сохраняем ответ
+      let answer = text;
       if (text === 'Skip this question ⏭️') {
-        session.answers[session.step] = 'Not specified';
-      } else {
-        session.answers[session.step] = text;
+        answer = 'Not specified';
       }
       
+      session.answers[session.step] = answer;
       session.step++;
       
-      // Check if survey is complete
+      // Проверяем завершен ли опрос
       if (session.step >= questions.length) {
-        // Survey completed
-        const answers = session.answers;
-        
-        console.log('Survey completed, answers:', answers);
-        
-        // Validate Google Drive link if provided
-        if (answers[7] && answers[7] !== 'Not specified' && !validateDriveLink(answers[7])) {
-          await sendMessage(chatId, '❌ Please provide a valid Google Drive link. The link should contain "drive.google.com" or "docs.google.com".\n\nPlease send the Google Drive link again:');
-          session.step--; // Go back to previous question
-          return res.status(200).json({ ok: true });
-        }
-        
-        // Send summary
-        const summaryMessage = `
-*✅ Project Survey Completed!*
-
-*Summary of submitted project:*
-👤 Client: ${answers[0]}
-🏗️ Room: ${answers[1]}
-📍 Location: ${answers[2]}
-🌟 Goal: ${answers[3]}
-💪 Work done: ${answers[4]}
-🧱 Materials: ${answers[5]}
-✨ Features: ${answers[6]}
-📂 Drive: ${answers[7]}
-
-Processing and saving your data...
-        `;
-        
-        await sendMessage(chatId, summaryMessage);
-        
-        try {
-          // Save to Google Sheets
-          console.log('Attempting to save to Google Sheets...');
-          await addRowToSheet(answers);
-          console.log('Successfully saved to Google Sheets');
-          
-          // Send notification to admin
-          const adminChatId = process.env.ADMIN_CHAT_ID;
-          if (adminChatId) {
-            const notificationText = createAdminNotification(answers);
-            await sendMessage(adminChatId, notificationText);
-            console.log('Admin notification sent');
-          }
-          
-          // Confirmation
-          await sendMessage(chatId, '🎉 *Project data successfully saved to Google Sheets!*\n\nThank you for your submission. The information has been sent to the project administrators and saved to our database.\n\n• Use /start to return to main menu\n• Use "🚀 Start New Survey" to submit another project', {
-            reply_markup: { remove_keyboard: true }
-          });
-          
-        } catch (error) {
-          console.error('Error saving to Google Sheets:', error);
-          await sendMessage(chatId, '❌ Error saving data to Google Sheets. The survey data has been recorded but there was an issue with the database.\n\nPlease contact support or try again later.\n\nError: ' + error.message);
-        }
-        
-        delete userSessions[userId];
-        
+        // Опрос завершен
+        await processCompletedSurvey(chatId, userId, session.answers);
       } else {
-        // Ask next question
-        const nextQuestion = questions[session.step];
+        // Сохраняем обновленное состояние в Redis и задаем следующий вопрос
+        await saveSession(userId, session.step, session.answers);
         
-        const options = {
+        await sendMessage(chatId, questions[session.step], {
           reply_markup: {
             keyboard: [[{ text: 'Skip this question ⏭️' }]],
             resize_keyboard: true
           }
-        };
-        
-        await sendMessage(chatId, nextQuestion, options);
+        });
       }
     } else {
-      // If user sends a message without active session, show menu
+      // Нет активной сессии
       await sendMessage(chatId, 'Hi! 👋 Use /start to see the main menu and available options.');
     }
     
