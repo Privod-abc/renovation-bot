@@ -3,6 +3,415 @@ import { JWT } from 'google-auth-library';
 import { Redis } from '@upstash/redis';
 import https from 'https';
 
+// ============================================================================
+// АВТОНОМНАЯ СИСТЕМА САМОДИАГНОСТИКИ И ВОССТАНОВЛЕНИЯ
+// ============================================================================
+
+// Настройки уведомлений
+const NOTIFICATION_SETTINGS = {
+  NOTIFY_RECOVERY: true,
+  NOTIFY_CRITICAL: true,
+  NOTIFY_SERVICES: false,
+  MIN_NOTIFICATION_INTERVAL: 30 * 60 * 1000,
+  QUIET_HOURS: { enabled: false, start: 23, end: 7 }
+};
+
+// Настройки для продакшна
+const DEBUG_MODE = process.env.NODE_ENV === 'development';
+const REQUEST_TIMEOUT = 8000; // Уменьшено с 15000
+const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
+const KEEPALIVE_INTERVAL = 10 * 60 * 1000;
+const MAX_CONSECUTIVE_ERRORS = 3;
+
+// Переменные состояния
+let lastHealthCheck = 0;
+let lastKeepaliveCheck = 0;
+let consecutiveErrors = 0;
+let lastNotifications = { recovery: 0, critical: 0, services: 0 };
+
+// Debug логирование
+function debugLog(message, ...args) {
+  if (DEBUG_MODE) {
+    console.log(message, ...args);
+  }
+}
+
+// Безопасное логирование сообщений
+function logUserMessage(userId, text) {
+  const sanitizedText = text ? text.substring(0, 50).replace(/[^\w\s-]/g, '') : 'empty';
+  console.log(`Message from user [${userId.toString().substring(0, 3)}***]: [${sanitizedText}...]`);
+}
+
+// Проверка возможности отправки уведомления
+function canSendNotification(type) {
+  const now = Date.now();
+  const lastSent = lastNotifications[type] || 0;
+  
+  if (now - lastSent < NOTIFICATION_SETTINGS.MIN_NOTIFICATION_INTERVAL) {
+    return false;
+  }
+  
+  if (NOTIFICATION_SETTINGS.QUIET_HOURS.enabled) {
+    const currentHour = new Date().getHours();
+    const start = NOTIFICATION_SETTINGS.QUIET_HOURS.start;
+    const end = NOTIFICATION_SETTINGS.QUIET_HOURS.end;
+    
+    if (start > end) {
+      if (currentHour >= start || currentHour < end) return false;
+    } else {
+      if (currentHour >= start && currentHour < end) return false;
+    }
+  }
+  
+  return true;
+}
+
+// Автоматическая самодиагностика
+async function selfHealingCheck() {
+  const now = Date.now();
+  
+  if (now - lastHealthCheck < HEALTH_CHECK_INTERVAL) {
+    return true;
+  }
+  
+  lastHealthCheck = now;
+  
+  try {
+    debugLog('🔍 Self-healing check started');
+    
+    const botToken = process.env.BOT_TOKEN;
+    const expectedUrl = 'https://renovation-bot-six.vercel.app/api/webhook';
+    
+    const webhookInfo = await getWebhookInfo(botToken);
+    if (!webhookInfo.ok) throw new Error('Failed to get webhook info');
+    
+    const currentUrl = webhookInfo.result?.url;
+    const pendingCount = webhookInfo.result?.pending_update_count || 0;
+    const lastErrorDate = webhookInfo.result?.last_error_date || 0;
+    const hasRecentErrors = lastErrorDate > 0 && (now/1000 - lastErrorDate) < 300;
+    
+    debugLog(`Webhook status: URL match=${currentUrl === expectedUrl}, Pending=${pendingCount}`);
+    
+    const needsHealing = (
+      currentUrl !== expectedUrl ||
+      pendingCount > 5 ||
+      hasRecentErrors
+    );
+    
+    if (needsHealing) {
+      console.log('🚨 Bot needs healing - attempting recovery');
+      
+      const healResult = await healWebhook(botToken, expectedUrl);
+      
+      if (healResult.success) {
+        consecutiveErrors = 0;
+        console.log('✅ Bot self-healed successfully');
+        
+        await notifyAdminSafe('recovery', {
+          previousUrl: currentUrl,
+          pendingCount: pendingCount,
+          healedAt: new Date().toLocaleString()
+        });
+        
+        setTimeout(() => selfPing().catch(() => {}), 30000);
+        return true;
+      } else {
+        consecutiveErrors++;
+        console.error(`❌ Self-healing failed (attempt ${consecutiveErrors})`);
+        
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          await notifyAdminSafe('critical', {
+            consecutiveErrors,
+            lastError: healResult.error
+          });
+        }
+        return false;
+      }
+    } else {
+      consecutiveErrors = 0;
+      debugLog('✅ Bot is healthy');
+      return true;
+    }
+    
+  } catch (error) {
+    consecutiveErrors++;
+    console.error('❌ Self-healing check error:', error.message);
+    
+    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+      await notifyAdminSafe('critical', {
+        consecutiveErrors,
+        lastError: error.message
+      });
+    }
+    return false;
+  }
+}
+
+// Получение информации о webhook
+function getWebhookInfo(botToken) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${botToken}/getWebhookInfo`,
+      method: 'GET'
+    };
+    
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    
+    req.on('error', reject);
+    req.setTimeout(REQUEST_TIMEOUT, () => {
+      req.destroy();
+      reject(new Error('Webhook info timeout'));
+    });
+    
+    req.end();
+  });
+}
+
+// Восстановление webhook
+async function healWebhook(botToken, url) {
+  try {
+    debugLog('🔧 Healing webhook');
+    
+    await deleteWebhook(botToken);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    const setResult = await setWebhookHTTPS(botToken, url);
+    
+    if (setResult.ok) {
+      debugLog('✅ Webhook healed successfully');
+      return { success: true };
+    } else {
+      throw new Error(setResult.description || 'Unknown error');
+    }
+    
+  } catch (error) {
+    console.error('❌ Webhook healing failed:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+function deleteWebhook(botToken) {
+  return new Promise((resolve) => {
+    const postData = JSON.stringify({ url: '' });
+    
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${botToken}/setWebhook`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    };
+    
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (error) {
+          resolve({ ok: true });
+        }
+      });
+    });
+    
+    req.on('error', () => resolve({ ok: true }));
+    req.setTimeout(5000, () => {
+      req.destroy();
+      resolve({ ok: true });
+    });
+    
+    req.write(postData);
+    req.end();
+  });
+}
+
+function setWebhookHTTPS(botToken, url) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify({
+      url: url,
+      allowed_updates: ["message", "callback_query"],
+      drop_pending_updates: true
+    });
+    
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${botToken}/setWebhook`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    };
+    
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    
+    req.on('error', reject);
+    req.setTimeout(REQUEST_TIMEOUT, () => {
+      req.destroy();
+      reject(new Error('Set webhook timeout'));
+    });
+    
+    req.write(postData);
+    req.end();
+  });
+}
+
+// Поддержание активности Vercel
+async function keepVercelAlive() {
+  const now = Date.now();
+  
+  if (now - lastKeepaliveCheck < KEEPALIVE_INTERVAL) return;
+  lastKeepaliveCheck = now;
+  
+  try {
+    debugLog('🔄 Keepalive check started');
+    
+    setTimeout(async () => {
+      try {
+        const response = await fetch('https://renovation-bot-six.vercel.app/api/webhook', {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'RenovationBot-Keepalive/1.0',
+            'X-Keepalive': 'true'
+          }
+        });
+        
+        debugLog(`Keepalive response: ${response.status}`);
+      } catch (error) {
+        debugLog('Keepalive ping failed:', error.message);
+      }
+    }, 2000);
+    
+  } catch (error) {
+    debugLog('Keepalive error:', error.message);
+  }
+}
+
+// Самотестирование
+async function selfPing() {
+  try {
+    debugLog('📡 Self-ping initiated');
+    
+    const response = await fetch('https://renovation-bot-six.vercel.app/api/webhook', {
+      method: 'GET',
+      headers: { 'User-Agent': 'RenovationBot-SelfCheck/1.0' }
+    });
+    
+    return response.ok;
+  } catch (error) {
+    debugLog('Self-ping failed:', error.message);
+    return false;
+  }
+}
+
+// Безопасные уведомления админа
+async function notifyAdminSafe(type, data) {
+  try {
+    const adminChatId = process.env.ADMIN_CHAT_ID;
+    if (!adminChatId) return;
+    
+    if (type === 'recovery' && !NOTIFICATION_SETTINGS.NOTIFY_RECOVERY) return;
+    if (type === 'critical' && !NOTIFICATION_SETTINGS.NOTIFY_CRITICAL) return;
+    if (type === 'health_warning' && !NOTIFICATION_SETTINGS.NOTIFY_SERVICES) return;
+    
+    if (!canSendNotification(type)) {
+      debugLog(`Notification ${type} skipped (rate limited)`);
+      return;
+    }
+    
+    let message = '';
+    
+    if (type === 'recovery') {
+      message = `🤖 Bot Auto-Recovery!\n\n` +
+                `✅ Automatically fixed\n` +
+                `Previous URL: ${data.previousUrl?.substring(0, 40)}...\n` +
+                `Pending: ${data.pendingCount}\n` +
+                `Time: ${data.healedAt}`;
+                
+    } else if (type === 'critical') {
+      message = `🚨 Bot Critical Issue!\n\n` +
+                `❌ ${data.consecutiveErrors} healing failures\n` +
+                `Time: ${new Date().toLocaleString()}\n\n` +
+                `Check: https://renovation-bot-six.vercel.app/api/webhook`;
+    }
+    
+    if (message) {
+      await sendMessage(adminChatId, message);
+      lastNotifications[type] = Date.now();
+      debugLog(`Admin notification sent: ${type}`);
+    }
+    
+  } catch (error) {
+    console.error('❌ Admin notification failed:', error.message);
+  }
+}
+
+// Инициализация системы
+function initializeKeepalive() {
+  debugLog('🚀 Initializing autonomous system');
+  
+  setTimeout(() => {
+    keepVercelAlive();
+    scheduleNextKeepalive();
+  }, 30000);
+  
+  setTimeout(() => {
+    selfHealingCheck().catch(() => {});
+  }, 10000);
+}
+
+// Планирование следующей проверки
+async function scheduleNextKeepalive() {
+  try {
+    const nextCheck = 8 * 60 * 1000 + Math.random() * 4 * 60 * 1000;
+    
+    setTimeout(() => {
+      keepVercelAlive();
+      scheduleNextKeepalive();
+    }, nextCheck);
+    
+    debugLog(`Next keepalive in ${Math.round(nextCheck/1000/60)} minutes`);
+    
+  } catch (error) {
+    debugLog('Keepalive scheduling error:', error.message);
+    
+    setTimeout(() => {
+      keepVercelAlive();
+      scheduleNextKeepalive();
+    }, 10 * 60 * 1000);
+  }
+}
+
+// ============================================================================
+// ОСНОВНАЯ ЛОГИКА БОТА
+// ============================================================================
+
 // Инициализация Redis
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
@@ -14,8 +423,7 @@ const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ?
   process.env.AUTHORIZED_USERS.split(',').map(id => parseInt(id.trim())) : 
   [];
 
-console.log('✅ Authorized users loaded:', AUTHORIZED_USERS.length);
-console.log('🔴 Redis initialized');
+debugLog('Authorized users loaded:', AUTHORIZED_USERS.length);
 
 // Функция проверки авторизации
 function isUserAuthorized(userId) {
@@ -23,82 +431,67 @@ function isUserAuthorized(userId) {
   return AUTHORIZED_USERS.includes(userId);
 }
 
-// Questions in the survey (7 ВОПРОСОВ) - С ПОДСКАЗКАМИ И ОГРАНИЧЕНИЯМИ
+// Вопросы анкеты
 const questions = [
-  "🙋‍♂️ What is the client's name?\n\n📏 Maximum 50 characters\n💡 Examples: John Smith, Maria Rodriguez, ABC Construction",                                    // 0 - ОБЯЗАТЕЛЬНЫЙ
-  "🏗️ What room did you work on?\n\n📏 Maximum 30 characters\n💡 Enter only room names or list of rooms\n\nExamples: Kitchen, Living Room, Bathroom, House", // 1 - ОБЯЗАТЕЛЬНЫЙ  
-  "📍 In which city and state was this project completed?",              // 2 - можно пропустить
-  "🌟 What was the client's goal for this space?\n\nExamples: modernize layout, fix poor lighting, update style, old renovation, etc.", // 3
-  "💪 What work was done during the remodel?",                           // 4
-  "🧱 What materials were used?\n\nInclude names, colors, manufacturers if possible", // 5
-  "✨ Were there any interesting features or smart solutions implemented?\n\nExamples: round lighting, hidden drawers, custom panels" // 6
+  "🙋‍♂️ What is the client's name?\n\n📏 Maximum 50 characters\n💡 Examples: John Smith, Maria Rodriguez, ABC Construction",
+  "🏗️ What room did you work on?\n\n📏 Maximum 30 characters\n💡 Enter only room names or list of rooms\n\nExamples: Kitchen, Living Room, Bathroom, House",
+  "📍 In which city and state was this project completed?",
+  "🌟 What was the client's goal for this space?\n\nExamples: modernize layout, fix poor lighting, update style, old renovation, etc.",
+  "💪 What work was done during the remodel?",
+  "🧱 What materials were used?\n\nInclude names, colors, manufacturers if possible",
+  "✨ Were there any interesting features or smart solutions implemented?\n\nExamples: round lighting, hidden drawers, custom panels"
 ];
 
-// Column headers for Google Sheets - ИСПРАВЛЕНО
+// Заголовки для Google Sheets
 const COLUMN_HEADERS = [
-  'Date',
-  'Client Name',
-  'Room Type', 
-  'Location',
-  'Goal',
-  'Work Done',
-  'Materials',
-  'Features',
-  'Drive Folder'  // ИСПРАВЛЕНО: соответствует Google Sheets
+  'Date', 'Client Name', 'Room Type', 'Location',
+  'Goal', 'Work Done', 'Materials', 'Features', 'Drive Folder'
 ];
 
-// Константы для валидации
+// Константы валидации
 const MAX_CLIENT_NAME_LENGTH = 50;
 const MAX_ROOM_TYPE_LENGTH = 30;
-const REDIS_SESSION_TTL = 3600; // 1 час в секундах
+const REDIS_SESSION_TTL = 3600;
 
-// ✨ REDIS ФУНКЦИИ ДЛЯ СЕССИЙ
-
+// Redis функции
 async function getSession(userId) {
   try {
-    console.log(`🔍 Getting session for user ${userId}`);
+    debugLog(`Getting session for user ${userId}`);
     const session = await redis.get(`session_${userId}`);
-    console.log(`📋 Session found:`, !!session);
     return session;
   } catch (error) {
-    console.error('❌ Error getting session:', error);
+    console.error('❌ Error getting session:', error.message);
     return null;
   }
 }
 
 async function saveSession(userId, step, answers) {
   try {
-    console.log(`💾 Saving session for user ${userId}, step ${step}`);
+    debugLog(`Saving session for user ${userId}, step ${step}`);
     const sessionData = { step, answers, timestamp: Date.now() };
-    
     await redis.set(`session_${userId}`, sessionData, { ex: REDIS_SESSION_TTL });
-    console.log(`✅ Session saved successfully`);
     return true;
   } catch (error) {
-    console.error('❌ Error saving session:', error);
+    console.error('❌ Error saving session:', error.message);
     return false;
   }
 }
 
 async function deleteSession(userId) {
   try {
-    console.log(`🗑️ Deleting session for user ${userId}`);
+    debugLog(`Deleting session for user ${userId}`);
     await redis.del(`session_${userId}`);
-    console.log(`✅ Session deleted successfully`);
     return true;
   } catch (error) {
-    console.error('❌ Error deleting session:', error);
+    console.error('❌ Error deleting session:', error.message);
     return false;
   }
 }
 
-// 📝 ФУНКЦИЯ ДЛЯ СОЗДАНИЯ СОДЕРЖИМОГО ФАЙЛА
-
+// Генерация содержимого файла проекта
 function generateProjectFileContent(answers, driveFolder) {
   const date = new Date().toLocaleDateString('en-US', {
-    month: '2-digit',
-    day: '2-digit',
-    year: 'numeric'
+    month: '2-digit', day: '2-digit', year: 'numeric'
   });
   
   return `RENOVATION PROJECT BRIEF
@@ -138,28 +531,22 @@ FOLDER STRUCTURE
 === END OF PROJECT BRIEF ===`;
 }
 
-// ФУНКЦИЯ ВАЛИДАЦИИ И ОЧИСТКИ НАЗВАНИЙ ПАПОК
+// Санитизация и валидация названий папок
 function sanitizeAndValidateFolderName(clientName, roomType) {
-  // Убираем недопустимые символы для Google Drive и лишние пробелы
   const cleanClient = clientName.replace(/[<>:"/\\|?*]/g, '').trim().substring(0, MAX_CLIENT_NAME_LENGTH);
   const cleanRoom = roomType.replace(/[<>:"/\\|?*]/g, '').trim().substring(0, MAX_ROOM_TYPE_LENGTH);
   
-  // Заменяем множественные пробелы на одинарные
-  const finalClient = cleanClient.replace(/\s+/g, ' ');
-  const finalRoom = cleanRoom.replace(/\s+/g, ' ');
-  
   return { 
-    clientName: finalClient || 'Unknown Client', 
-    roomType: finalRoom || 'Unknown Room' 
+    clientName: cleanClient.replace(/\s+/g, ' ') || 'Unknown Client', 
+    roomType: cleanRoom.replace(/\s+/g, ' ') || 'Unknown Room' 
   };
 }
 
-// ФУНКЦИЯ ВАЛИДАЦИИ ВВОДА ПОЛЬЗОВАТЕЛЯ
+// Валидация ввода пользователя
 function validateUserInput(step, input) {
   const trimmedInput = input.trim();
   
   if (step === 0) {
-    // Вопрос 0: Имя клиента
     if (trimmedInput.length === 0) {
       return { valid: false, error: 'Client name cannot be empty' };
     }
@@ -170,7 +557,6 @@ function validateUserInput(step, input) {
       };
     }
   } else if (step === 1) {
-    // Вопрос 1: Тип комнаты
     if (trimmedInput.length === 0) {
       return { valid: false, error: 'Room type cannot be empty' };
     }
@@ -185,10 +571,10 @@ function validateUserInput(step, input) {
   return { valid: true, cleanInput: trimmedInput };
 }
 
-// Функция для создания файла в Google Drive
+// Создание файла в Google Drive
 async function createProjectFile(folderId, fileName, content, accessToken) {
   return new Promise((resolve, reject) => {
-    console.log(`📝 Creating file: ${fileName}`);
+    debugLog(`Creating file: ${fileName}`);
     
     const metadata = {
       name: fileName,
@@ -225,12 +611,10 @@ async function createProjectFile(folderId, fileName, content, accessToken) {
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
-        console.log(`📥 File creation response (${res.statusCode})`);
-        
         if (res.statusCode === 200) {
           try {
             const result = JSON.parse(data);
-            console.log(`✅ File created: ${result.id}`);
+            debugLog(`File created: ${result.id}`);
             resolve(result);
           } catch (parseError) {
             reject(new Error(`JSON parse error: ${parseError.message}`));
@@ -252,19 +636,12 @@ async function createProjectFile(folderId, fileName, content, accessToken) {
   });
 }
 
-// 🗂️ GOOGLE DRIVE ФУНКЦИИ
-
+// Создание проектной папки
 async function createProjectFolder(clientName, roomType, location) {
   try {
-    console.log('📁 === STARTING createProjectFolder ===');
+    debugLog('Creating project folder');
     
-    // ОЧИСТКА И ВАЛИДАЦИЯ НАЗВАНИЙ
     const cleaned = sanitizeAndValidateFolderName(clientName, roomType);
-    const finalClientName = cleaned.clientName;
-    const finalRoomType = cleaned.roomType;
-    
-    console.log(`📝 Cleaned parameters: "${finalClientName}" - "${finalRoomType}"`);
-    
     const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
     const serviceAccountAuth = new JWT({
       email: serviceAccountKey.client_email,
@@ -276,18 +653,12 @@ async function createProjectFolder(clientName, roomType, location) {
     });
 
     const token = await serviceAccountAuth.getAccessToken();
-    console.log('✅ Access token obtained');
     
-    // Создаем имя папки
     const date = new Date().toLocaleDateString('en-US', {
-      month: '2-digit',
-      day: '2-digit',  
-      year: 'numeric'
+      month: '2-digit', day: '2-digit', year: 'numeric'
     });
-    const folderName = `${finalClientName} - ${finalRoomType} - ${date}`;
-    console.log(`✅ Folder name: "${folderName}" (${folderName.length} chars)`);
+    const folderName = `${cleaned.clientName} - ${cleaned.roomType} - ${date}`;
     
-    // Создаем главную папку
     const mainFolderData = {
       name: folderName,
       mimeType: 'application/vnd.google-apps.folder',
@@ -295,54 +666,39 @@ async function createProjectFolder(clientName, roomType, location) {
     };
     
     const mainFolder = await createDriveFolder(mainFolderData, token.token);
-    console.log(`✅ Main folder created: ${mainFolder.id}`);
+    debugLog(`Main folder created: ${mainFolder.id}`);
     
-    // Создаем подпапки
+    // Создание подпапок параллельно (оптимизация!)
     const subfolders = ['Before', 'After', '3D Visualization', 'Floor Plans'];
-    const createdSubfolders = [];
+    const subfolderPromises = subfolders.map(name => 
+      createDriveFolder({
+        name,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [mainFolder.id]
+      }, token.token).catch(error => {
+        debugLog(`Error creating subfolder "${name}":`, error.message);
+        return null;
+      })
+    );
     
-    for (const subfolderName of subfolders) {
-      console.log(`📂 Creating subfolder: ${subfolderName}`);
-      
-      try {
-        const subfolderData = {
-          name: subfolderName,
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: [mainFolder.id]
-        };
-        
-        const subfolder = await createDriveFolder(subfolderData, token.token);
-        createdSubfolders.push(subfolder);
-        console.log(`✅ Subfolder created: ${subfolder.id}`);
-        
-      } catch (subError) {
-        console.error(`❌ Error creating subfolder "${subfolderName}":`, subError);
-      }
-    }
+    const createdSubfolders = await Promise.all(subfolderPromises);
+    debugLog(`Created ${createdSubfolders.filter(Boolean).length} subfolders`);
     
-    // Устанавливаем права доступа
-    try {
-      await setFolderPermissions(mainFolder.id, token.token);
-      console.log('✅ Permissions set');
-    } catch (permError) {
-      console.error('❌ Permissions error:', permError);
-    }
+    // Установка прав доступа (не критично если не удастся)
+    setFolderPermissions(mainFolder.id, token.token).catch(() => {});
     
     const folderUrl = `https://drive.google.com/drive/folders/${mainFolder.id}?usp=sharing`;
     
-    const result = {
+    return {
       folderId: mainFolder.id,
       folderName: folderName,
       folderUrl: folderUrl,
-      subfolders: createdSubfolders,
+      subfolders: createdSubfolders.filter(Boolean),
       token: token.token
     };
     
-    console.log('🎯 === createProjectFolder FINISHED ===');
-    return result;
-    
   } catch (error) {
-    console.error('❌ CRITICAL ERROR in createProjectFolder:', error);
+    console.error('❌ Error creating project folder:', error.message);
     throw error;
   }
 }
@@ -380,7 +736,7 @@ async function createDriveFolder(folderData, accessToken) {
     });
     
     req.on('error', reject);
-    req.setTimeout(15000, () => {
+    req.setTimeout(REQUEST_TIMEOUT, () => {
       req.destroy();
       reject(new Error('Request timeout'));
     });
@@ -391,12 +747,8 @@ async function createDriveFolder(folderData, accessToken) {
 }
 
 async function setFolderPermissions(folderId, accessToken) {
-  return new Promise((resolve, reject) => {
-    const permissionData = {
-      role: 'reader',
-      type: 'anyone'
-    };
-    
+  return new Promise((resolve) => {
+    const permissionData = { role: 'reader', type: 'anyone' };
     const postData = JSON.stringify(permissionData);
     
     const options = {
@@ -414,23 +766,13 @@ async function setFolderPermissions(folderId, accessToken) {
     const req = https.request(options, (res) => {
       let data = '';
       res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            resolve(JSON.parse(data));
-          } catch (parseError) {
-            reject(new Error(`Permissions parse error: ${parseError.message}`));
-          }
-        } else {
-          resolve(null); // Не критично
-        }
-      });
+      res.on('end', () => resolve(res.statusCode === 200));
     });
     
-    req.on('error', () => resolve(null)); // Не критично
-    req.setTimeout(10000, () => {
+    req.on('error', () => resolve(false));
+    req.setTimeout(5000, () => {
       req.destroy();
-      resolve(null); // Не критично
+      resolve(false);
     });
     
     req.write(postData);
@@ -438,7 +780,7 @@ async function setFolderPermissions(folderId, accessToken) {
   });
 }
 
-// ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ sendMessage с timeout
+// Отправка сообщения
 function sendMessage(chatId, text, options = {}) {
   return new Promise((resolve, reject) => {
     const botToken = process.env.BOT_TOKEN;
@@ -461,7 +803,7 @@ function sendMessage(chatId, text, options = {}) {
       }
     };
     
-    console.log(`📤 Sending message to ${chatId}:`, text.substring(0, 50) + '...');
+    debugLog(`Sending message to ${chatId}`);
     
     const request = https.request(requestOptions, (response) => {
       let data = '';
@@ -470,7 +812,6 @@ function sendMessage(chatId, text, options = {}) {
         try {
           const result = JSON.parse(data);
           if (result.ok) {
-            console.log('✅ Message sent successfully');
             resolve(result);
           } else {
             console.error('❌ Telegram API error:', result.description);
@@ -482,9 +823,7 @@ function sendMessage(chatId, text, options = {}) {
       });
     });
     
-    // КРИТИЧЕСКИЙ TIMEOUT для предотвращения зависания
-    request.setTimeout(8000, () => {
-      console.error('⏰ Telegram API timeout');
+    request.setTimeout(REQUEST_TIMEOUT, () => {
       request.destroy();
       reject(new Error('Telegram API timeout'));
     });
@@ -536,8 +875,6 @@ function makeApiCall(method, params = {}) {
 
 async function initializeGoogleSheets() {
   try {
-    console.log('🔧 Initializing Google Sheets');
-    
     const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
     const serviceAccountAuth = new JWT({
       email: serviceAccountKey.client_email,
@@ -547,12 +884,10 @@ async function initializeGoogleSheets() {
 
     const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
     await doc.loadInfo();
-    console.log(`✅ Connected to: ${doc.title}`);
     
     let sheet = doc.sheetsByIndex[0];
     if (!sheet) {
       sheet = await doc.addSheet({ title: 'Renovation Projects' });
-      console.log('✅ Created new sheet');
     }
     
     await sheet.loadHeaderRow();
@@ -560,21 +895,18 @@ async function initializeGoogleSheets() {
     if (!sheet.headerValues || sheet.headerValues.length === 0) {
       await sheet.setHeaderRow(COLUMN_HEADERS);
       await sheet.loadHeaderRow();
-      console.log('✅ Headers set');
     }
     
     return sheet;
     
   } catch (error) {
-    console.error('❌ Google Sheets error:', error);
+    console.error('❌ Google Sheets error:', error.message);
     throw error;
   }
 }
 
 async function addRowToSheet(answers, driveFolder) {
   try {
-    console.log('📊 Adding row to Google Sheets');
-    
     const sheet = await initializeGoogleSheets();
     
     const rowData = {
@@ -590,20 +922,12 @@ async function addRowToSheet(answers, driveFolder) {
     };
     
     const addedRow = await sheet.addRow(rowData);
-    console.log(`✅ Row added: ${addedRow._rowNumber}`);
-    
-    // Верификация
-    const savedLink = addedRow.get('Drive Folder');
-    if (savedLink && savedLink !== 'Not created') {
-      console.log('✅ Drive Folder verified in sheets');
-    } else {
-      console.warn('⚠️ Drive Folder not saved properly');
-    }
+    debugLog(`Row added: ${addedRow._rowNumber}`);
     
     return true;
     
   } catch (error) {
-    console.error('❌ Google Sheets error:', error);
+    console.error('❌ Google Sheets error:', error.message);
     throw error;
   }
 }
@@ -618,9 +942,9 @@ async function setupBotCommands() {
         { command: 'cancel', description: '❌ Cancel current survey' }
       ]
     });
-    console.log('✅ Bot commands set up');
+    debugLog('Bot commands set up');
   } catch (error) {
-    console.error('❌ Error setting up commands:', error);
+    console.error('❌ Error setting up commands:', error.message);
   }
 }
 
@@ -658,36 +982,27 @@ I help collect information about completed renovation projects for content creat
 
 async function processCompletedSurvey(chatId, userId, answers) {
   try {
-    console.log('🎯 === PROCESSING COMPLETED SURVEY ===');
+    console.log('🎯 Processing completed survey');
     
     await sendMessage(chatId, "✅ Survey completed!\n\nCreating project folder...");
     
-    // Создание папки
     const driveFolder = await createProjectFolder(
       answers[0] || 'Unknown Client',
       answers[1] || 'Unknown Room', 
       answers[2] || 'Unknown Location'
     );
-    console.log('✅ Drive folder created');
     
-    // Асинхронное создание файла (не блокирует)
-    createProjectFileAsync(answers, driveFolder).catch(err => {
-      console.error('❌ File creation failed (non-blocking):', err);
-    });
+    // Асинхронное создание файла
+    createProjectFileAsync(answers, driveFolder).catch(() => {});
     
-    // Сохранение в Google Sheets
     await addRowToSheet(answers, driveFolder);
-    console.log('✅ Data saved to sheets');
     
-    // Уведомление админу
     const adminChatId = process.env.ADMIN_CHAT_ID;
     if (adminChatId) {
       const notification = createAdminNotification(answers, driveFolder);
       await sendMessage(adminChatId, notification);
-      console.log('✅ Admin notified');
     }
     
-    // Финальное сообщение БЕЗ MARKDOWN КОНФЛИКТОВ
     const confirmationMessage = `✅ Project successfully processed!
 
 📁 Folder: ${driveFolder.folderName}
@@ -708,16 +1023,15 @@ Use /start for main menu`;
     });
     
     await deleteSession(userId);
-    console.log('🎯 === SURVEY PROCESSING COMPLETE ===');
+    console.log('✅ Survey processing complete');
     
   } catch (error) {
-    console.error('❌ CRITICAL ERROR in survey processing:', error);
+    console.error('❌ Error processing survey:', error.message);
     await deleteSession(userId);
     await sendMessage(chatId, `❌ Error processing survey: ${error.message}`);
   }
 }
 
-// Асинхронная функция создания файла
 async function createProjectFileAsync(answers, driveFolder) {
   try {
     if (!driveFolder?.folderId || !driveFolder?.token) {
@@ -728,32 +1042,67 @@ async function createProjectFileAsync(answers, driveFolder) {
     const fileName = `${answers[0] || 'Project'} - Project Brief.txt`;
     
     await createProjectFile(driveFolder.folderId, fileName, content, driveFolder.token);
-    console.log('✅ Project file created');
+    debugLog('Project file created');
     
   } catch (error) {
-    console.error('❌ File creation failed:', error);
+    debugLog('File creation failed:', error.message);
   }
 }
+
+// ============================================================================
+// ОСНОВНОЙ HANDLER
+// ============================================================================
 
 export default async function handler(req, res) {
   console.log(`${new Date().toISOString()} - ${req.method} request received`);
   
+  // Инициализация при первом запросе
+  if (lastKeepaliveCheck === 0) {
+    initializeKeepalive();
+  }
+  
+  // Автоматическая самодиагностика
+  selfHealingCheck().catch(() => {});
+  
+  if (req.method === 'GET') {
+    const userAgent = req.headers['user-agent'] || '';
+    const isKeepalive = req.headers['x-keepalive'] === 'true';
+    const isSelfCheck = userAgent.includes('RenovationBot');
+    
+    if (isKeepalive || isSelfCheck) {
+      debugLog('Keepalive/self-check ping received');
+      keepVercelAlive();
+    }
+    
+    return res.status(200).json({ 
+      message: 'Renovation Bot - Autonomous & Self-Healing',
+      status: 'active',
+      timestamp: new Date().toISOString(),
+      lastHealthCheck: new Date(lastHealthCheck).toISOString(),
+      consecutiveErrors: consecutiveErrors
+    });
+  }
+
   if (req.method !== 'POST') {
     return res.status(200).json({ message: 'This endpoint handles Telegram webhook events' });
+  }
+
+  // Периодический self-ping
+  if (Math.random() < 0.02) {
+    setTimeout(() => selfPing().catch(() => {}), 5000);
   }
 
   try {
     const update = req.body;
     
-    // Handle callback queries (inline button presses)
+    // Обработка callback queries
     if (update.callback_query) {
       const { message, from, data, id } = update.callback_query;
       const chatId = message.chat.id;
       const userId = from.id;
       
-      console.log(`Callback from ${userId}: ${data}`);
+      logUserMessage(userId, `callback: ${data}`);
       
-      // Проверка авторизации
       if (!isUserAuthorized(userId)) {
         await makeApiCall('answerCallbackQuery', {
           callback_query_id: id,
@@ -764,18 +1113,12 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       
-      // Ответ на callback query
       await makeApiCall('answerCallbackQuery', { callback_query_id: id });
       
       if (data === 'start_survey') {
         await saveSession(userId, 0, []);
-        
         await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project.\n\n⚠️ First 2 questions are required (client name and room type).\n\nLet\'s begin!');
-        
-        // Первый вопрос БЕЗ Skip кнопки
-        await sendMessage(chatId, questions[0], {
-          reply_markup: { remove_keyboard: true }
-        });
+        await sendMessage(chatId, questions[0], { reply_markup: { remove_keyboard: true } });
         
       } else if (data === 'show_help') {
         const helpText = `*❓ How to Use This Bot*
@@ -837,9 +1180,8 @@ Ready to submit a project? Use /start to begin.`;
     const chatId = chat.id;
     const userId = from.id;
     
-    console.log(`Message from ${userId}: ${text}`);
+    logUserMessage(userId, text);
     
-    // Проверка авторизации  
     if (!isUserAuthorized(userId)) {
       await sendMessage(chatId, `🚫 Access denied. Your ID: ${userId}`);
       return res.status(200).json({ ok: true });
@@ -847,7 +1189,7 @@ Ready to submit a project? Use /start to begin.`;
     
     // Обработка команд
     if (text === '/start') {
-      setupBotCommands().catch(console.error);
+      setupBotCommands().catch(() => {});
       await showMainMenu(chatId);
       return res.status(200).json({ ok: true });
     }
@@ -855,9 +1197,7 @@ Ready to submit a project? Use /start to begin.`;
     if (text === '/survey') {
       await saveSession(userId, 0, []);
       await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project.\n\n⚠️ First 2 questions are required (client name and room type).\n\nLet\'s begin!');
-      await sendMessage(chatId, questions[0], {
-        reply_markup: { remove_keyboard: true }
-      });
+      await sendMessage(chatId, questions[0], { reply_markup: { remove_keyboard: true } });
       return res.status(200).json({ ok: true });
     }
     
@@ -891,13 +1231,12 @@ Need to go back to the main menu? Just type /start`;
       return res.status(200).json({ ok: true });
     }
     
-    // ОБРАБОТКА ОТВЕТОВ НА ВОПРОСЫ АНКЕТЫ
+    // Обработка ответов на вопросы анкеты
     const session = await getSession(userId);
     
     if (session) {
-      console.log(`📋 Session found: step ${session.step}`);
+      debugLog(`Session found: step ${session.step}`);
       
-      // Проверка валидности сессии
       if (!session.answers || !Array.isArray(session.answers)) {
         console.error('❌ Invalid session data');
         await deleteSession(userId);
@@ -907,7 +1246,6 @@ Need to go back to the main menu? Just type /start`;
         return res.status(200).json({ ok: true });
       }
       
-      // Получение и обработка ответа
       let answer = text;
       if (text === 'Skip this question ⏭️') {
         answer = 'Not specified';
@@ -915,7 +1253,7 @@ Need to go back to the main menu? Just type /start`;
       
       const currentStep = session.step;
       
-      // ВАЛИДАЦИЯ ДЛЯ ОБЯЗАТЕЛЬНЫХ ВОПРОСОВ (0, 1)
+      // Валидация для обязательных вопросов
       if (currentStep <= 1 && answer !== 'Not specified') {
         const validation = validateUserInput(currentStep, answer);
         
@@ -929,21 +1267,15 @@ Need to go back to the main menu? Just type /start`;
         answer = validation.cleanInput;
       }
       
-      // Сохранение ответа и переход к следующему шагу
       session.answers[session.step] = answer;
       session.step++;
       
-      // Проверка завершения анкеты
       if (session.step >= questions.length) {
-        // Анкета завершена
         await processCompletedSurvey(chatId, userId, session.answers);
       } else {
-        // Продолжение анкеты
         await saveSession(userId, session.step, session.answers);
         
-        // Определение необходимости Skip кнопки
         const isSkippable = session.step >= 2;
-        
         const replyMarkup = isSkippable ? {
           keyboard: [[{ text: 'Skip this question ⏭️' }]],
           resize_keyboard: true
@@ -951,19 +1283,16 @@ Need to go back to the main menu? Just type /start`;
           remove_keyboard: true
         };
         
-        await sendMessage(chatId, questions[session.step], {
-          reply_markup: replyMarkup
-        });
+        await sendMessage(chatId, questions[session.step], { reply_markup: replyMarkup });
       }
     } else {
-      // Нет активной сессии
       await sendMessage(chatId, 'Hi! 👋 Use /start to see the main menu and available options.');
     }
     
     return res.status(200).json({ ok: true });
     
   } catch (error) {
-    console.error('❌ Webhook error:', error);
+    console.error('❌ Webhook error:', error.message);
     return res.status(200).json({ ok: true });
   }
 }
