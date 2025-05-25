@@ -1,9 +1,8 @@
 {
-  "name": "renovation-project-bot",
-  "version": "1.0.0",
-  "description": "Telegram bot for collecting information about renovation projects",
-  "main": "api/webhook.js",
   "dependencies": {
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "google-spreadsheet": "^4.1.2", 
+    "google-auth-library": "^9.4.1",
+    "@upstash/redis": "^1.28.4"
   }
 }
