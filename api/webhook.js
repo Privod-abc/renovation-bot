@@ -23,7 +23,7 @@ function isUserAuthorized(userId) {
   return AUTHORIZED_USERS.includes(userId);
 }
 
-// Questions in the survey (УБРАЛИ 8-й ВОПРОС)
+// Questions in the survey (7 ВОПРОСОВ)
 const questions = [
   "🙋‍♂️ What is the client's name?",
   "🏗️ What room did you work on? (e.g. kitchen, bathroom, laundry room)",
@@ -34,7 +34,7 @@ const questions = [
   "✨ Were there any interesting features or smart solutions implemented? (e.g. round lighting, hidden drawers, custom panels)"
 ];
 
-// Column headers for Google Sheets (УБРАЛИ Drive Link)
+// Column headers for Google Sheets
 const COLUMN_HEADERS = [
   'Date',
   'Client Name',
@@ -88,13 +88,18 @@ async function deleteSession(userId) {
   }
 }
 
-// 🗂️ GOOGLE DRIVE ФУНКЦИИ
+// 🗂️ ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ GOOGLE DRIVE ФУНКЦИЙ
 
 async function createProjectFolder(clientName, roomType, location) {
   try {
-    console.log('📁 Creating Google Drive folder...');
+    console.log('📁 === STARTING createProjectFolder ===');
+    console.log(`📝 Parameters: client="${clientName}", room="${roomType}", location="${location}"`);
     
+    console.log('🔑 Step A: Parsing service account key...');
     const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    console.log('✅ Step A: Service account key parsed');
+    
+    console.log('🔑 Step B: Creating JWT auth...');
     const serviceAccountAuth = new JWT({
       email: serviceAccountKey.client_email,
       key: serviceAccountKey.private_key,
@@ -103,59 +108,94 @@ async function createProjectFolder(clientName, roomType, location) {
         'https://www.googleapis.com/auth/drive'
       ],
     });
+    console.log('✅ Step B: JWT auth created');
 
-    // Получаем токен доступа
+    console.log('🔑 Step C: Getting access token...');
     const token = await serviceAccountAuth.getAccessToken();
+    console.log('✅ Step C: Access token obtained');
+    console.log(`🔑 Token length: ${token.token ? token.token.length : 'null'}`);
     
     // Создаем имя папки
+    console.log('📝 Step D: Creating folder name...');
     const date = new Date().toLocaleDateString('en-US', {
       month: '2-digit',
       day: '2-digit',  
       year: 'numeric'
     });
     const folderName = `${clientName} - ${roomType} - ${date}`;
+    console.log(`✅ Step D: Folder name created: "${folderName}"`);
+    console.log(`📁 Parent folder ID: "${process.env.PARENT_FOLDER_ID}"`);
     
     // Создаем главную папку
+    console.log('🗂️ Step E: Creating main folder...');
     const mainFolderData = {
       name: folderName,
       mimeType: 'application/vnd.google-apps.folder',
-      parents: [process.env.PARENT_FOLDER_ID] // ID родительской папки из переменных
+      parents: [process.env.PARENT_FOLDER_ID]
     };
     
     const mainFolder = await createDriveFolder(mainFolderData, token.token);
-    console.log('✅ Main folder created:', mainFolder.name);
+    console.log(`✅ Step E: Main folder created with ID: ${mainFolder.id}`);
     
     // Создаем подпапки
+    console.log('📂 Step F: Creating subfolders...');
     const subfolders = ['Before', 'After', '3D Visualization', 'Floor Plans'];
     const createdSubfolders = [];
     
-    for (const subfolderName of subfolders) {
-      const subfolderData = {
-        name: subfolderName,
-        mimeType: 'application/vnd.google-apps.folder',
-        parents: [mainFolder.id]
-      };
+    for (let i = 0; i < subfolders.length; i++) {
+      const subfolderName = subfolders[i];
+      console.log(`📂 Step F.${i+1}: Creating subfolder "${subfolderName}"...`);
       
-      const subfolder = await createDriveFolder(subfolderData, token.token);
-      createdSubfolders.push(subfolder);
-      console.log(`✅ Subfolder created: ${subfolder.name}`);
+      try {
+        const subfolderData = {
+          name: subfolderName,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [mainFolder.id]
+        };
+        
+        const subfolder = await createDriveFolder(subfolderData, token.token);
+        createdSubfolders.push(subfolder);
+        console.log(`✅ Step F.${i+1}: Subfolder created with ID: ${subfolder.id}`);
+        
+      } catch (subError) {
+        console.error(`❌ Step F.${i+1}: Error creating subfolder "${subfolderName}":`, subError);
+      }
     }
     
-    // Устанавливаем права доступа (просмотр для всех по ссылке)
-    await setFolderPermissions(mainFolder.id, token.token);
+    console.log('✅ Step F: All subfolders processing completed');
     
+    // Устанавливаем права доступа
+    console.log('🔐 Step G: Setting folder permissions...');
+    try {
+      await setFolderPermissions(mainFolder.id, token.token);
+      console.log('✅ Step G: Permissions set successfully');
+    } catch (permError) {
+      console.error('❌ Step G: Permissions error:', permError);
+      console.log('⚠️ Step G: Continuing without permissions...');
+    }
+    
+    console.log('🔗 Step H: Creating folder URL...');
     const folderUrl = `https://drive.google.com/drive/folders/${mainFolder.id}`;
-    console.log('🔗 Folder URL:', folderUrl);
+    console.log(`✅ Step H: Folder URL: ${folderUrl}`);
     
-    return {
+    const result = {
       folderId: mainFolder.id,
       folderName: folderName,
       folderUrl: folderUrl,
       subfolders: createdSubfolders
     };
     
+    console.log('🎯 === createProjectFolder FINISHED SUCCESSFULLY ===');
+    console.log('📊 Final result:', JSON.stringify(result, null, 2));
+    
+    return result;
+    
   } catch (error) {
-    console.error('❌ Error creating Google Drive folder:', error);
+    console.error('❌ CRITICAL ERROR in createProjectFolder:', error);
+    console.error('❌ Error type:', typeof error);
+    console.error('❌ Error name:', error.name);
+    console.error('❌ Error message:', error.message);
+    console.error('❌ Error stack:', error.stack);
     throw error;
   }
 }
@@ -163,6 +203,7 @@ async function createProjectFolder(clientName, roomType, location) {
 async function createDriveFolder(folderData, accessToken) {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify(folderData);
+    console.log(`📤 Creating folder: ${folderData.name}`);
     
     const options = {
       hostname: 'www.googleapis.com',
@@ -180,15 +221,32 @@ async function createDriveFolder(folderData, accessToken) {
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
+        console.log(`📥 Drive API response (${res.statusCode}):`, data.substring(0, 200));
+        
         if (res.statusCode === 200) {
-          resolve(JSON.parse(data));
+          try {
+            const result = JSON.parse(data);
+            resolve(result);
+          } catch (parseError) {
+            reject(new Error(`JSON parse error: ${parseError.message}`));
+          }
         } else {
           reject(new Error(`Drive API error: ${res.statusCode} - ${data}`));
         }
       });
     });
     
-    req.on('error', reject);
+    req.on('error', (error) => {
+      console.error('🌐 HTTP request error:', error);
+      reject(error);
+    });
+    
+    req.setTimeout(15000, () => {
+      console.error('⏰ Request timeout');
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+    
     req.write(postData);
     req.end();
   });
@@ -202,6 +260,7 @@ async function setFolderPermissions(folderId, accessToken) {
     };
     
     const postData = JSON.stringify(permissionData);
+    console.log(`🔐 Setting permissions for folder: ${folderId}`);
     
     const options = {
       hostname: 'www.googleapis.com',
@@ -219,15 +278,32 @@ async function setFolderPermissions(folderId, accessToken) {
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
+        console.log(`🔐 Permissions API response (${res.statusCode}):`, data.substring(0, 100));
+        
         if (res.statusCode === 200) {
-          resolve(JSON.parse(data));
+          try {
+            const result = JSON.parse(data);
+            resolve(result);
+          } catch (parseError) {
+            reject(new Error(`Permissions JSON parse error: ${parseError.message}`));
+          }
         } else {
           reject(new Error(`Permissions API error: ${res.statusCode} - ${data}`));
         }
       });
     });
     
-    req.on('error', reject);
+    req.on('error', (error) => {
+      console.error('🌐 Permissions request error:', error);
+      reject(error);
+    });
+    
+    req.setTimeout(10000, () => {
+      console.error('⏰ Permissions request timeout');
+      req.destroy();
+      reject(new Error('Permissions timeout'));
+    });
+    
     req.write(postData);
     req.end();
   });
@@ -445,11 +521,15 @@ I help collect information about completed renovation projects for content creat
   await sendMessage(chatId, welcomeText, createMainMenu());
 }
 
+// 🎯 ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ processCompletedSurvey
+
 async function processCompletedSurvey(chatId, userId, answers) {
   try {
+    console.log('🎯 === STARTING processCompletedSurvey ===');
     console.log('✅ Survey completed, answers:', answers);
     
     // Send summary
+    console.log('📤 Step 1: Sending summary message...');
     const summaryMessage = `
 *✅ Project Survey Completed!*
 
@@ -466,30 +546,44 @@ Creating Google Drive folder and saving data...
     `;
     
     await sendMessage(chatId, summaryMessage);
+    console.log('✅ Step 1 completed: Summary message sent');
     
     try {
       // Создаем Google Drive папку
-      console.log('📁 Creating Google Drive folder...');
+      console.log('📁 Step 2: Starting createProjectFolder...');
+      console.log('📁 Calling createProjectFolder with:');
+      console.log(`   Client: "${answers[0] || 'Unknown Client'}"`);
+      console.log(`   Room: "${answers[1] || 'Unknown Room'}"`);
+      console.log(`   Location: "${answers[2] || 'Unknown Location'}"`);
+      
       const driveFolder = await createProjectFolder(
         answers[0] || 'Unknown Client',
         answers[1] || 'Unknown Room', 
         answers[2] || 'Unknown Location'
       );
       
+      console.log('✅ Step 2 completed: createProjectFolder returned');
+      console.log('📂 Drive folder result:', JSON.stringify(driveFolder, null, 2));
+      
       // Save to Google Sheets
-      console.log('Attempting to save to Google Sheets...');
+      console.log('📊 Step 3: Starting addRowToSheet...');
       await addRowToSheet(answers, driveFolder);
-      console.log('Successfully saved to Google Sheets');
+      console.log('✅ Step 3 completed: addRowToSheet finished');
       
       // Send notification to admin
+      console.log('👤 Step 4: Sending admin notification...');
       const adminChatId = process.env.ADMIN_CHAT_ID;
       if (adminChatId) {
+        console.log(`📧 Admin chat ID: ${adminChatId}`);
         const notificationText = createAdminNotification(answers, driveFolder);
         await sendMessage(adminChatId, notificationText);
-        console.log('Admin notification sent');
+        console.log('✅ Step 4 completed: Admin notification sent');
+      } else {
+        console.log('⚠️ Step 4 skipped: No admin chat ID configured');
       }
       
       // Confirmation with Drive folder link
+      console.log('💬 Step 5: Sending final confirmation...');
       await sendMessage(chatId, `🎉 *Project data successfully processed!*
 
 ✅ Data saved to Google Sheets
@@ -511,16 +605,27 @@ Upload your project files to the appropriate folders!
         reply_markup: { remove_keyboard: true }
       });
       
+      console.log('✅ Step 5 completed: Final confirmation sent');
+      
     } catch (error) {
-      console.error('Error in post-processing:', error);
+      console.error('❌ ERROR in Steps 2-5:', error);
+      console.error('❌ Error name:', error.name);
+      console.error('❌ Error message:', error.message);
+      console.error('❌ Error stack:', error.stack);
+      
       await sendMessage(chatId, `❌ Error processing project data: ${error.message}\n\nPlease contact support or try again later.`);
     }
     
     // Удаляем сессию из Redis
+    console.log('🗑️ Step 6: Deleting Redis session...');
     await deleteSession(userId);
+    console.log('✅ Step 6 completed: Redis session deleted');
+    
+    console.log('🎯 === processCompletedSurvey FINISHED SUCCESSFULLY ===');
     
   } catch (error) {
-    console.error('Error processing completed survey:', error);
+    console.error('❌ CRITICAL ERROR in processCompletedSurvey:', error);
+    console.error('❌ Critical error stack:', error.stack);
     await sendMessage(chatId, '❌ Error processing survey. Please try again later.');
   }
 }
