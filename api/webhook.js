@@ -4,43 +4,172 @@ import { Redis } from '@upstash/redis';
 import https from 'https';
 
 // ============================================================================
-// АВТОНОМНАЯ СИСТЕМА САМОДИАГНОСТИКИ И ВОССТАНОВЛЕНИЯ
+// КОНФИГУРАЦИЯ И КОНСТАНТЫ
 // ============================================================================
+
+// Настройки для продакшна
+const DEBUG_MODE = process.env.NODE_ENV === 'development';
+const REQUEST_TIMEOUT = 8000;
+const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000; // 5 минут
+const MAX_CONSECUTIVE_ERRORS = 3;
 
 // Настройки уведомлений
 const NOTIFICATION_SETTINGS = {
   NOTIFY_RECOVERY: true,
   NOTIFY_CRITICAL: true,
-  NOTIFY_SERVICES: false,
   MIN_NOTIFICATION_INTERVAL: 30 * 60 * 1000,
   QUIET_HOURS: { enabled: false, start: 23, end: 7 }
 };
 
-// Настройки для продакшна
-const DEBUG_MODE = process.env.NODE_ENV === 'development';
-const REQUEST_TIMEOUT = 8000; // Уменьшено с 15000
-const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
-const KEEPALIVE_INTERVAL = 10 * 60 * 1000;
-const MAX_CONSECUTIVE_ERRORS = 3;
+// Константы валидации
+const MAX_CLIENT_NAME_LENGTH = 50;
+const MAX_ROOM_TYPE_LENGTH = 30;
+const REDIS_SESSION_TTL = 3600;
 
-// Переменные состояния
+// Переменные состояния системы восстановления
 let lastHealthCheck = 0;
-let lastKeepaliveCheck = 0;
 let consecutiveErrors = 0;
-let lastNotifications = { recovery: 0, critical: 0, services: 0 };
+let lastNotifications = { recovery: 0, critical: 0 };
 
-// Debug логирование
+// Текстовые константы
+const HELP_TEXT = `*❓ Renovation Project Bot Help*
+
+Use /start to see the main menu with all options.
+
+*Quick Commands:*
+- /start - Main menu
+- /survey - Start survey directly
+- /cancel - Cancel current survey
+
+*Survey Info:*
+- 7 questions total
+- First 2 questions are required (client name, room type)
+- Other questions can be skipped
+- Get organized Google Drive folder with upload instructions
+
+Need to go back to the main menu? Just type /start`;
+
+const ABOUT_TEXT = `*📊 About Renovation Project Bot*
+
+*Purpose:*
+Streamline renovation project data collection for business use.
+
+*Features:*
+- 📁 Automatic Google Drive folders
+- 📊 Google Sheets data storage
+- 📝 Project Brief files
+- 🔗 Instant shareable links
+
+*Business Benefits:*
+- Content creation for marketing
+- CRM and database management
+- Project analytics and reporting
+- Organized file management
+
+Ready to submit a project? Use /start to begin.`;
+
+const SURVEY_START_TEXT = `📝 *Starting Project Survey*
+
+I will guide you through 7 questions about your completed renovation project.
+
+⚠️ First 2 questions are required (client name and room type).
+
+Let's begin!`;
+
+const WELCOME_TEXT = `🏠 *Welcome to Renovation Project Bot!*
+
+I help collect information about completed renovation projects for content creation, CRM management, and business analytics.
+
+*Choose an option below to get started:*`;
+
+// Структурированные вопросы анкеты
+const questions = [
+  {
+    id: 'client_name',
+    text: "🙋‍♂️ What is the client's name?\n\n📏 Maximum 50 characters\n💡 Examples: John Smith, Maria Rodriguez, ABC Construction",
+    required: true,
+    maxLength: MAX_CLIENT_NAME_LENGTH,
+    field: 'Client Name'
+  },
+  {
+    id: 'room_type',
+    text: "🏗️ What room did you work on?\n\n📏 Maximum 30 characters\n💡 Enter only room names or list of rooms\n\nExamples: Kitchen, Living Room, Bathroom, House",
+    required: true,
+    maxLength: MAX_ROOM_TYPE_LENGTH,
+    field: 'Room Type'
+  },
+  {
+    id: 'location',
+    text: "📍 In which city and state was this project completed?",
+    required: false,
+    field: 'Location'
+  },
+  {
+    id: 'goal',
+    text: "🌟 What was the client's goal for this space?\n\nExamples: modernize layout, fix poor lighting, update style, old renovation, etc.",
+    required: false,
+    field: 'Goal'
+  },
+  {
+    id: 'work_done',
+    text: "💪 What work was done during the remodel?",
+    required: false,
+    field: 'Work Done'
+  },
+  {
+    id: 'materials',
+    text: "🧱 What materials were used?\n\nInclude names, colors, manufacturers if possible",
+    required: false,
+    field: 'Materials'
+  },
+  {
+    id: 'features',
+    text: "✨ Were there any interesting features or smart solutions implemented?\n\nExamples: round lighting, hidden drawers, custom panels",
+    required: false,
+    field: 'Features'
+  }
+];
+
+// Заголовки для Google Sheets
+const COLUMN_HEADERS = [
+  'Date', 'Client Name', 'Room Type', 'Location',
+  'Goal', 'Work Done', 'Materials', 'Features', 'Drive Folder'
+];
+
+// ============================================================================
+// УТИЛИТЫ И ЛОГИРОВАНИЕ
+// ============================================================================
+
+// Безопасное debug логирование
 function debugLog(message, ...args) {
   if (DEBUG_MODE) {
     console.log(message, ...args);
   }
 }
 
-// Безопасное логирование сообщений
-function logUserMessage(userId, text) {
-  const sanitizedText = text ? text.substring(0, 50).replace(/[^\w\s-]/g, '') : 'empty';
-  console.log(`Message from user [${userId.toString().substring(0, 3)}***]: [${sanitizedText}...]`);
+// Безопасное логирование сообщений пользователей
+function logUserMessage(userId, text, type = 'message') {
+  const maskedUserId = '***' + userId.toString().slice(-4);
+  const sanitizedText = text ? text.substring(0, 50).replace(/[^\w\s\-]/g, '') : 'empty';
+  console.log(`${type} from user [${maskedUserId}]: [${sanitizedText}...]`);
 }
+
+// Безопасное логирование обновлений
+function logUpdate(update) {
+  if (DEBUG_MODE) {
+    console.log('Update received:', {
+      type: update.message ? 'message' : update.callback_query ? 'callback_query' : 'unknown',
+      userId: update.message?.from?.id ? '***' + update.message.from.id.toString().slice(-4) :
+              update.callback_query?.from?.id ? '***' + update.callback_query.from.id.toString().slice(-4) : 'unknown',
+      hasText: !!update.message?.text,
+      hasCallback: !!update.callback_query?.data
+    });
+  }
+}
+
+// ============================================================================
+// СИСТЕМА АВТОМАТИЧЕСКОГО ВОССТАНОВЛЕНИЯ WEBHOOK
+// ============================================================================
 
 // Проверка возможности отправки уведомления
 function canSendNotification(type) {
@@ -66,7 +195,7 @@ function canSendNotification(type) {
   return true;
 }
 
-// Автоматическая самодиагностика
+// Автоматическая самодиагностика webhook
 async function selfHealingCheck() {
   const now = Date.now();
   
@@ -113,7 +242,6 @@ async function selfHealingCheck() {
           healedAt: new Date().toLocaleString()
         });
         
-        setTimeout(() => selfPing().catch(() => {}), 30000);
         return true;
       } else {
         consecutiveErrors++;
@@ -282,54 +410,6 @@ function setWebhookHTTPS(botToken, url) {
   });
 }
 
-// Поддержание активности Vercel
-async function keepVercelAlive() {
-  const now = Date.now();
-  
-  if (now - lastKeepaliveCheck < KEEPALIVE_INTERVAL) return;
-  lastKeepaliveCheck = now;
-  
-  try {
-    debugLog('🔄 Keepalive check started');
-    
-    setTimeout(async () => {
-      try {
-        const response = await fetch('https://renovation-bot-six.vercel.app/api/webhook', {
-          method: 'GET',
-          headers: {
-            'User-Agent': 'RenovationBot-Keepalive/1.0',
-            'X-Keepalive': 'true'
-          }
-        });
-        
-        debugLog(`Keepalive response: ${response.status}`);
-      } catch (error) {
-        debugLog('Keepalive ping failed:', error.message);
-      }
-    }, 2000);
-    
-  } catch (error) {
-    debugLog('Keepalive error:', error.message);
-  }
-}
-
-// Самотестирование
-async function selfPing() {
-  try {
-    debugLog('📡 Self-ping initiated');
-    
-    const response = await fetch('https://renovation-bot-six.vercel.app/api/webhook', {
-      method: 'GET',
-      headers: { 'User-Agent': 'RenovationBot-SelfCheck/1.0' }
-    });
-    
-    return response.ok;
-  } catch (error) {
-    debugLog('Self-ping failed:', error.message);
-    return false;
-  }
-}
-
 // Безопасные уведомления админа
 async function notifyAdminSafe(type, data) {
   try {
@@ -338,7 +418,6 @@ async function notifyAdminSafe(type, data) {
     
     if (type === 'recovery' && !NOTIFICATION_SETTINGS.NOTIFY_RECOVERY) return;
     if (type === 'critical' && !NOTIFICATION_SETTINGS.NOTIFY_CRITICAL) return;
-    if (type === 'health_warning' && !NOTIFICATION_SETTINGS.NOTIFY_SERVICES) return;
     
     if (!canSendNotification(type)) {
       debugLog(`Notification ${type} skipped (rate limited)`);
@@ -372,44 +451,8 @@ async function notifyAdminSafe(type, data) {
   }
 }
 
-// Инициализация системы
-function initializeKeepalive() {
-  debugLog('🚀 Initializing autonomous system');
-  
-  setTimeout(() => {
-    keepVercelAlive();
-    scheduleNextKeepalive();
-  }, 30000);
-  
-  setTimeout(() => {
-    selfHealingCheck().catch(() => {});
-  }, 10000);
-}
-
-// Планирование следующей проверки
-async function scheduleNextKeepalive() {
-  try {
-    const nextCheck = 8 * 60 * 1000 + Math.random() * 4 * 60 * 1000;
-    
-    setTimeout(() => {
-      keepVercelAlive();
-      scheduleNextKeepalive();
-    }, nextCheck);
-    
-    debugLog(`Next keepalive in ${Math.round(nextCheck/1000/60)} minutes`);
-    
-  } catch (error) {
-    debugLog('Keepalive scheduling error:', error.message);
-    
-    setTimeout(() => {
-      keepVercelAlive();
-      scheduleNextKeepalive();
-    }, 10 * 60 * 1000);
-  }
-}
-
 // ============================================================================
-// ОСНОВНАЯ ЛОГИКА БОТА
+// ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ
 // ============================================================================
 
 // Инициализация Redis
@@ -431,61 +474,79 @@ function isUserAuthorized(userId) {
   return AUTHORIZED_USERS.includes(userId);
 }
 
-// Вопросы анкеты
-const questions = [
-  "🙋‍♂️ What is the client's name?\n\n📏 Maximum 50 characters\n💡 Examples: John Smith, Maria Rodriguez, ABC Construction",
-  "🏗️ What room did you work on?\n\n📏 Maximum 30 characters\n💡 Enter only room names or list of rooms\n\nExamples: Kitchen, Living Room, Bathroom, House",
-  "📍 In which city and state was this project completed?",
-  "🌟 What was the client's goal for this space?\n\nExamples: modernize layout, fix poor lighting, update style, old renovation, etc.",
-  "💪 What work was done during the remodel?",
-  "🧱 What materials were used?\n\nInclude names, colors, manufacturers if possible",
-  "✨ Were there any interesting features or smart solutions implemented?\n\nExamples: round lighting, hidden drawers, custom panels"
-];
+// ============================================================================
+// REDIS ФУНКЦИИ (С УЛУЧШЕННОЙ ОБРАБОТКОЙ ОШИБОК)
+// ============================================================================
 
-// Заголовки для Google Sheets
-const COLUMN_HEADERS = [
-  'Date', 'Client Name', 'Room Type', 'Location',
-  'Goal', 'Work Done', 'Materials', 'Features', 'Drive Folder'
-];
-
-// Константы валидации
-const MAX_CLIENT_NAME_LENGTH = 50;
-const MAX_ROOM_TYPE_LENGTH = 30;
-const REDIS_SESSION_TTL = 3600;
-
-// Redis функции
 async function getSession(userId) {
   try {
-    debugLog(`Getting session for user ${userId}`);
+    debugLog(`Getting session for user ***${userId.toString().slice(-4)}`);
     const session = await redis.get(`session_${userId}`);
     return session;
   } catch (error) {
-    console.error('❌ Error getting session:', error.message);
-    return null;
+    console.error('❌ Redis get session error:', error.message);
+    throw error; // Пробрасываем ошибку выше для обработки
   }
 }
 
 async function saveSession(userId, step, answers) {
   try {
-    debugLog(`Saving session for user ${userId}, step ${step}`);
+    debugLog(`Saving session for user ***${userId.toString().slice(-4)}, step ${step}`);
     const sessionData = { step, answers, timestamp: Date.now() };
     await redis.set(`session_${userId}`, sessionData, { ex: REDIS_SESSION_TTL });
     return true;
   } catch (error) {
-    console.error('❌ Error saving session:', error.message);
-    return false;
+    console.error('❌ Redis save session error:', error.message);
+    throw error; // Пробрасываем ошибку выше для обработки
   }
 }
 
 async function deleteSession(userId) {
   try {
-    debugLog(`Deleting session for user ${userId}`);
+    debugLog(`Deleting session for user ***${userId.toString().slice(-4)}`);
     await redis.del(`session_${userId}`);
     return true;
   } catch (error) {
-    console.error('❌ Error deleting session:', error.message);
+    console.error('❌ Redis delete session error:', error.message);
+    // Для удаления сессии не критично если не удалось
     return false;
   }
+}
+
+// ============================================================================
+// ВАЛИДАЦИЯ И ОБРАБОТКА ДАННЫХ
+// ============================================================================
+
+// Универсальная функция валидации
+function validateUserInput(questionConfig, input) {
+  const trimmedInput = input.trim();
+  
+  if (questionConfig.required && trimmedInput.length === 0) {
+    return { 
+      valid: false, 
+      error: `${questionConfig.field} cannot be empty` 
+    };
+  }
+  
+  if (questionConfig.maxLength && trimmedInput.length > questionConfig.maxLength) {
+    return { 
+      valid: false, 
+      error: `${questionConfig.field} is too long (${trimmedInput.length}/${questionConfig.maxLength} characters)` 
+    };
+  }
+  
+  return { valid: true, cleanInput: trimmedInput };
+}
+
+// Санитизация и валидация названий папок
+function sanitizeAndValidateFolderName(clientName, roomType) {
+  const cleanClient = clientName.replace(/[<>:"/\\|?*]/g, '').trim().substring(0, MAX_CLIENT_NAME_LENGTH);
+  const cleanRoom = roomType.replace(/[<>:"/\\|?*]/g, '').trim().substring(0, MAX_ROOM_TYPE_LENGTH);
+  
+  return { 
+    clientName: cleanClient.replace(/\s+/g, ' ') || 'Unknown Client', 
+    roomType: cleanRoom.replace(/\s+/g, ' ') || 'Unknown Room' 
+  };
 }
 
 // Генерация содержимого файла проекта
@@ -531,45 +592,9 @@ FOLDER STRUCTURE
 === END OF PROJECT BRIEF ===`;
 }
 
-// Санитизация и валидация названий папок
-function sanitizeAndValidateFolderName(clientName, roomType) {
-  const cleanClient = clientName.replace(/[<>:"/\\|?*]/g, '').trim().substring(0, MAX_CLIENT_NAME_LENGTH);
-  const cleanRoom = roomType.replace(/[<>:"/\\|?*]/g, '').trim().substring(0, MAX_ROOM_TYPE_LENGTH);
-  
-  return { 
-    clientName: cleanClient.replace(/\s+/g, ' ') || 'Unknown Client', 
-    roomType: cleanRoom.replace(/\s+/g, ' ') || 'Unknown Room' 
-  };
-}
-
-// Валидация ввода пользователя
-function validateUserInput(step, input) {
-  const trimmedInput = input.trim();
-  
-  if (step === 0) {
-    if (trimmedInput.length === 0) {
-      return { valid: false, error: 'Client name cannot be empty' };
-    }
-    if (trimmedInput.length > MAX_CLIENT_NAME_LENGTH) {
-      return { 
-        valid: false, 
-        error: `Client name is too long (${trimmedInput.length} characters). Please keep it under ${MAX_CLIENT_NAME_LENGTH} characters` 
-      };
-    }
-  } else if (step === 1) {
-    if (trimmedInput.length === 0) {
-      return { valid: false, error: 'Room type cannot be empty' };
-    }
-    if (trimmedInput.length > MAX_ROOM_TYPE_LENGTH) {
-      return { 
-        valid: false, 
-        error: `Room description is too long (${trimmedInput.length} characters). Please keep it under ${MAX_ROOM_TYPE_LENGTH} characters` 
-      };
-    }
-  }
-  
-  return { valid: true, cleanInput: trimmedInput };
-}
+// ============================================================================
+// GOOGLE SERVICES (С УЛУЧШЕННОЙ ОБРАБОТКОЙ ОШИБОК)
+// ============================================================================
 
 // Создание файла в Google Drive
 async function createProjectFile(folderId, fileName, content, accessToken) {
@@ -617,7 +642,7 @@ async function createProjectFile(folderId, fileName, content, accessToken) {
             debugLog(`File created: ${result.id}`);
             resolve(result);
           } catch (parseError) {
-            reject(new Error(`JSON parse error: ${parseError.message}`));
+            reject(new Error(`File creation parse error: ${parseError.message}`));
           }
         } else {
           reject(new Error(`Drive API error: ${res.statusCode}`));
@@ -626,7 +651,7 @@ async function createProjectFile(folderId, fileName, content, accessToken) {
     });
     
     req.on('error', reject);
-    req.setTimeout(10000, () => {
+    req.setTimeout(REQUEST_TIMEOUT, () => {
       req.destroy();
       reject(new Error('File creation timeout'));
     });
@@ -636,13 +661,21 @@ async function createProjectFile(folderId, fileName, content, accessToken) {
   });
 }
 
-// Создание проектной папки
+// Создание проектной папки с параллельным созданием подпапок
 async function createProjectFolder(clientName, roomType, location) {
   try {
     debugLog('Creating project folder');
     
     const cleaned = sanitizeAndValidateFolderName(clientName, roomType);
-    const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    
+    let serviceAccountKey;
+    try {
+      serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    } catch (parseError) {
+      console.error('❌ Invalid Google service account configuration');
+      throw new Error('Google service account parsing failed');
+    }
+    
     const serviceAccountAuth = new JWT({
       email: serviceAccountKey.client_email,
       key: serviceAccountKey.private_key,
@@ -668,7 +701,7 @@ async function createProjectFolder(clientName, roomType, location) {
     const mainFolder = await createDriveFolder(mainFolderData, token.token);
     debugLog(`Main folder created: ${mainFolder.id}`);
     
-    // Создание подпапок параллельно (оптимизация!)
+    // Параллельное создание подпапок (оптимизация!)
     const subfolders = ['Before', 'After', '3D Visualization', 'Floor Plans'];
     const subfolderPromises = subfolders.map(name => 
       createDriveFolder({
@@ -727,7 +760,7 @@ async function createDriveFolder(folderData, accessToken) {
           try {
             resolve(JSON.parse(data));
           } catch (parseError) {
-            reject(new Error(`JSON parse error: ${parseError.message}`));
+            reject(new Error(`Drive folder parse error: ${parseError.message}`));
           }
         } else {
           reject(new Error(`Drive API error: ${res.statusCode}`));
@@ -738,7 +771,7 @@ async function createDriveFolder(folderData, accessToken) {
     req.on('error', reject);
     req.setTimeout(REQUEST_TIMEOUT, () => {
       req.destroy();
-      reject(new Error('Request timeout'));
+      reject(new Error('Drive folder timeout'));
     });
     
     req.write(postData);
@@ -780,6 +813,80 @@ async function setFolderPermissions(folderId, accessToken) {
   });
 }
 
+async function initializeGoogleSheets() {
+  try {
+    let serviceAccountKey;
+    try {
+      serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    } catch (parseError) {
+      console.error('❌ Invalid Google service account configuration');
+      throw new Error('Google service account parsing failed');
+    }
+    
+    const serviceAccountAuth = new JWT({
+      email: serviceAccountKey.client_email,
+      key: serviceAccountKey.private_key,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
+    await doc.loadInfo();
+    
+    let sheet = doc.sheetsByIndex[0];
+    if (!sheet) {
+      sheet = await doc.addSheet({ title: 'Renovation Projects' });
+    }
+    
+    await sheet.loadHeaderRow();
+    
+    if (!sheet.headerValues || sheet.headerValues.length === 0) {
+      await sheet.setHeaderRow(COLUMN_HEADERS);
+      await sheet.loadHeaderRow();
+    }
+    
+    return sheet;
+    
+  } catch (error) {
+    console.error('❌ Google Sheets error:', error.message);
+    throw error;
+  }
+}
+
+async function addRowToSheet(answers, driveFolder) {
+  try {
+    const sheet = await initializeGoogleSheets();
+    
+    if (!sheet) {
+      throw new Error('Failed to initialize Google Sheets');
+    }
+    
+    const rowData = {
+      'Date': new Date().toLocaleDateString('en-US'),
+      'Client Name': answers[0] || 'Not specified',
+      'Room Type': answers[1] || 'Not specified',
+      'Location': answers[2] || 'Not specified',
+      'Goal': answers[3] || 'Not specified',
+      'Work Done': answers[4] || 'Not specified',
+      'Materials': answers[5] || 'Not specified',
+      'Features': answers[6] || 'Not specified',
+      'Drive Folder': driveFolder?.folderUrl || 'Not created'
+    };
+    
+    const addedRow = await sheet.addRow(rowData);
+    debugLog(`Row added: ${addedRow._rowNumber}`);
+    
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Google Sheets error:', error.message);
+    throw error;
+  }
+}
+
+// ============================================================================
+// TELEGRAM API
+// ============================================================================
+
 // Отправка сообщения
 function sendMessage(chatId, text, options = {}) {
   return new Promise((resolve, reject) => {
@@ -803,7 +910,7 @@ function sendMessage(chatId, text, options = {}) {
       }
     };
     
-    debugLog(`Sending message to ${chatId}`);
+    debugLog(`Sending message to ***${chatId.toString().slice(-4)}`);
     
     const request = https.request(requestOptions, (response) => {
       let data = '';
@@ -873,65 +980,6 @@ function makeApiCall(method, params = {}) {
   });
 }
 
-async function initializeGoogleSheets() {
-  try {
-    const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-    const serviceAccountAuth = new JWT({
-      email: serviceAccountKey.client_email,
-      key: serviceAccountKey.private_key,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-
-    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
-    await doc.loadInfo();
-    
-    let sheet = doc.sheetsByIndex[0];
-    if (!sheet) {
-      sheet = await doc.addSheet({ title: 'Renovation Projects' });
-    }
-    
-    await sheet.loadHeaderRow();
-    
-    if (!sheet.headerValues || sheet.headerValues.length === 0) {
-      await sheet.setHeaderRow(COLUMN_HEADERS);
-      await sheet.loadHeaderRow();
-    }
-    
-    return sheet;
-    
-  } catch (error) {
-    console.error('❌ Google Sheets error:', error.message);
-    throw error;
-  }
-}
-
-async function addRowToSheet(answers, driveFolder) {
-  try {
-    const sheet = await initializeGoogleSheets();
-    
-    const rowData = {
-      'Date': new Date().toLocaleDateString('en-US'),
-      'Client Name': answers[0] || 'Not specified',
-      'Room Type': answers[1] || 'Not specified',
-      'Location': answers[2] || 'Not specified',
-      'Goal': answers[3] || 'Not specified',
-      'Work Done': answers[4] || 'Not specified',
-      'Materials': answers[5] || 'Not specified',
-      'Features': answers[6] || 'Not specified',
-      'Drive Folder': driveFolder?.folderUrl || 'Not created'
-    };
-    
-    const addedRow = await sheet.addRow(rowData);
-    debugLog(`Row added: ${addedRow._rowNumber}`);
-    
-    return true;
-    
-  } catch (error) {
-    console.error('❌ Google Sheets error:', error.message);
-    throw error;
-  }
-}
-
 async function setupBotCommands() {
   try {
     await makeApiCall('setMyCommands', {
@@ -947,6 +995,10 @@ async function setupBotCommands() {
     console.error('❌ Error setting up commands:', error.message);
   }
 }
+
+// ============================================================================
+// UI КОМПОНЕНТЫ
+// ============================================================================
 
 function createAdminNotification(answers, driveFolder) {
   return `📢 New Project Submitted!
@@ -971,14 +1023,12 @@ function createMainMenu() {
 }
 
 async function showMainMenu(chatId) {
-  const welcomeText = `🏠 *Welcome to Renovation Project Bot!*
-
-I help collect information about completed renovation projects for content creation, CRM management, and business analytics.
-
-*Choose an option below to get started:*`;
-  
-  await sendMessage(chatId, welcomeText, createMainMenu());
+  await sendMessage(chatId, WELCOME_TEXT, createMainMenu());
 }
+
+// ============================================================================
+// БИЗНЕС-ЛОГИКА (С УЛУЧШЕННОЙ ОБРАБОТКОЙ ОШИБОК И ПАРАЛЛЕЛИЗМОМ)
+// ============================================================================
 
 async function processCompletedSurvey(chatId, userId, answers) {
   try {
@@ -986,21 +1036,48 @@ async function processCompletedSurvey(chatId, userId, answers) {
     
     await sendMessage(chatId, "✅ Survey completed!\n\nCreating project folder...");
     
+    // 1. Создаем папку и проверяем критический результат
     const driveFolder = await createProjectFolder(
       answers[0] || 'Unknown Client',
       answers[1] || 'Unknown Room', 
       answers[2] || 'Unknown Location'
     );
     
-    // Асинхронное создание файла
-    createProjectFileAsync(answers, driveFolder).catch(() => {});
+    // 2. КРИТИЧЕСКАЯ ПРОВЕРКА
+    if (!driveFolder || !driveFolder.folderId) {
+      throw new Error('Failed to create project folder - cannot continue');
+    }
     
-    await addRowToSheet(answers, driveFolder);
+    // 3. ПАРАЛЛЕЛЬНЫЕ ОПЕРАЦИИ с правильной обработкой ошибок
+    const [fileResult, sheetResult] = await Promise.allSettled([
+      createProjectFile(
+        driveFolder.folderId, 
+        `${answers[0] || 'Project'} - Project Brief.txt`,
+        generateProjectFileContent(answers, driveFolder),
+        driveFolder.token
+      ),
+      addRowToSheet(answers, driveFolder)
+    ]);
     
+    // 4. Проверяем результаты операций
+    if (fileResult.status === 'rejected') {
+      console.error('❌ File creation failed:', fileResult.reason.message);
+      // Не критично - продолжаем
+    }
+    
+    if (sheetResult.status === 'rejected') {
+      console.error('❌ Sheets update failed:', sheetResult.reason.message);
+      // Это критическая ошибка - данные не сохранены
+      throw sheetResult.reason;
+    }
+    
+    // 5. ПАРАЛЛЕЛЬНЫЕ УВЕДОМЛЕНИЯ
     const adminChatId = process.env.ADMIN_CHAT_ID;
+    const notificationPromises = [];
+    
     if (adminChatId) {
       const notification = createAdminNotification(answers, driveFolder);
-      await sendMessage(adminChatId, notification);
+      notificationPromises.push(sendMessage(adminChatId, notification));
     }
     
     const confirmationMessage = `✅ Project successfully processed!
@@ -1018,9 +1095,12 @@ Floor plans - Floor Plans folder
 
 Use /start for main menu`;
 
-    await sendMessage(chatId, confirmationMessage, {
+    notificationPromises.push(sendMessage(chatId, confirmationMessage, {
       reply_markup: { remove_keyboard: true }
-    });
+    }));
+    
+    // 6. Отправляем уведомления параллельно
+    await Promise.allSettled(notificationPromises);
     
     await deleteSession(userId);
     console.log('✅ Survey processing complete');
@@ -1032,22 +1112,35 @@ Use /start for main menu`;
   }
 }
 
-async function createProjectFileAsync(answers, driveFolder) {
-  try {
-    if (!driveFolder?.folderId || !driveFolder?.token) {
-      throw new Error('Missing folder data for file creation');
-    }
-    
-    const content = generateProjectFileContent(answers, driveFolder);
-    const fileName = `${answers[0] || 'Project'} - Project Brief.txt`;
-    
-    await createProjectFile(driveFolder.folderId, fileName, content, driveFolder.token);
-    debugLog('Project file created');
-    
-  } catch (error) {
-    debugLog('File creation failed:', error.message);
+// ============================================================================
+// COMMAND HANDLERS (DRY ПРИНЦИП)
+// ============================================================================
+
+const commandHandlers = {
+  '/start': async (chatId, userId) => {
+    setupBotCommands().catch(() => {});
+    await showMainMenu(chatId);
+  },
+  
+  '/survey': async (chatId, userId) => {
+    await saveSession(userId, 0, []);
+    await sendMessage(chatId, SURVEY_START_TEXT);
+    await sendMessage(chatId, questions[0].text, {
+      reply_markup: { remove_keyboard: true }
+    });
+  },
+  
+  '/help': async (chatId, userId) => {
+    await sendMessage(chatId, HELP_TEXT);
+  },
+  
+  '/cancel': async (chatId, userId) => {
+    await deleteSession(userId);
+    await sendMessage(chatId, '❌ Survey cancelled.\n\nUse /start to return to the main menu.', {
+      reply_markup: { remove_keyboard: true }
+    });
   }
-}
+};
 
 // ============================================================================
 // ОСНОВНОЙ HANDLER
@@ -1056,26 +1149,12 @@ async function createProjectFileAsync(answers, driveFolder) {
 export default async function handler(req, res) {
   console.log(`${new Date().toISOString()} - ${req.method} request received`);
   
-  // Инициализация при первом запросе
-  if (lastKeepaliveCheck === 0) {
-    initializeKeepalive();
-  }
-  
-  // Автоматическая самодиагностика
+  // Автоматическая самодиагностика webhook (НЕ keepalive!)
   selfHealingCheck().catch(() => {});
   
   if (req.method === 'GET') {
-    const userAgent = req.headers['user-agent'] || '';
-    const isKeepalive = req.headers['x-keepalive'] === 'true';
-    const isSelfCheck = userAgent.includes('RenovationBot');
-    
-    if (isKeepalive || isSelfCheck) {
-      debugLog('Keepalive/self-check ping received');
-      keepVercelAlive();
-    }
-    
     return res.status(200).json({ 
-      message: 'Renovation Bot - Autonomous & Self-Healing',
+      message: 'Renovation Bot - Production Ready',
       status: 'active',
       timestamp: new Date().toISOString(),
       lastHealthCheck: new Date(lastHealthCheck).toISOString(),
@@ -1087,13 +1166,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ message: 'This endpoint handles Telegram webhook events' });
   }
 
-  // Периодический self-ping
-  if (Math.random() < 0.02) {
-    setTimeout(() => selfPing().catch(() => {}), 5000);
-  }
-
   try {
     const update = req.body;
+    logUpdate(update);
     
     // Обработка callback queries
     if (update.callback_query) {
@@ -1101,7 +1176,7 @@ export default async function handler(req, res) {
       const chatId = message.chat.id;
       const userId = from.id;
       
-      logUserMessage(userId, `callback: ${data}`);
+      logUserMessage(userId, data, 'callback');
       
       if (!isUserAuthorized(userId)) {
         await makeApiCall('answerCallbackQuery', {
@@ -1117,11 +1192,11 @@ export default async function handler(req, res) {
       
       if (data === 'start_survey') {
         await saveSession(userId, 0, []);
-        await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project.\n\n⚠️ First 2 questions are required (client name and room type).\n\nLet\'s begin!');
-        await sendMessage(chatId, questions[0], { reply_markup: { remove_keyboard: true } });
+        await sendMessage(chatId, SURVEY_START_TEXT);
+        await sendMessage(chatId, questions[0].text, { reply_markup: { remove_keyboard: true } });
         
       } else if (data === 'show_help') {
-        const helpText = `*❓ How to Use This Bot*
+        await sendMessage(chatId, `*❓ How to Use This Bot*
 
 *Available Commands:*
 - /start - Show main menu
@@ -1142,31 +1217,10 @@ export default async function handler(req, res) {
 - Data saved to Google Sheets  
 - Upload instructions provided
 
-Use /start anytime to return to the main menu.`;
-        
-        await sendMessage(chatId, helpText);
+Use /start anytime to return to the main menu.`);
         
       } else if (data === 'about_bot') {
-        const aboutText = `*📊 About Renovation Project Bot*
-
-*Purpose:*
-Streamline renovation project data collection for business use.
-
-*Features:*
-- 📁 Automatic Google Drive folders
-- 📊 Google Sheets data storage
-- 📝 Project Brief files
-- 🔗 Instant shareable links
-
-*Business Benefits:*
-- Content creation for marketing
-- CRM and database management
-- Project analytics and reporting
-- Organized file management
-
-Ready to submit a project? Use /start to begin.`;
-        
-        await sendMessage(chatId, aboutText);
+        await sendMessage(chatId, ABOUT_TEXT);
       }
       
       return res.status(200).json({ ok: true });
@@ -1187,52 +1241,25 @@ Ready to submit a project? Use /start to begin.`;
       return res.status(200).json({ ok: true });
     }
     
-    // Обработка команд
-    if (text === '/start') {
-      setupBotCommands().catch(() => {});
-      await showMainMenu(chatId);
-      return res.status(200).json({ ok: true });
-    }
-    
-    if (text === '/survey') {
-      await saveSession(userId, 0, []);
-      await sendMessage(chatId, '📝 *Starting Project Survey*\n\nI will guide you through 7 questions about your completed renovation project.\n\n⚠️ First 2 questions are required (client name and room type).\n\nLet\'s begin!');
-      await sendMessage(chatId, questions[0], { reply_markup: { remove_keyboard: true } });
-      return res.status(200).json({ ok: true });
-    }
-    
-    if (text === '/help') {
-      const helpText = `*❓ Renovation Project Bot Help*
-
-Use /start to see the main menu with all options.
-
-*Quick Commands:*
-- /start - Main menu
-- /survey - Start survey directly
-- /cancel - Cancel current survey
-
-*Survey Info:*
-- 7 questions total
-- First 2 questions are required (client name, room type)
-- Other questions can be skipped
-- Get organized Google Drive folder with upload instructions
-
-Need to go back to the main menu? Just type /start`;
-      
-      await sendMessage(chatId, helpText);
-      return res.status(200).json({ ok: true });
-    }
-    
-    if (text === '/cancel') {
-      await deleteSession(userId);
-      await sendMessage(chatId, '❌ Survey cancelled.\n\nUse /start to return to the main menu.', {
-        reply_markup: { remove_keyboard: true }
-      });
+    // Обработка команд через handlers (DRY принцип)
+    const handler = commandHandlers[text];
+    if (handler) {
+      await handler(chatId, userId);
       return res.status(200).json({ ok: true });
     }
     
     // Обработка ответов на вопросы анкеты
-    const session = await getSession(userId);
+    let session;
+    try {
+      session = await getSession(userId);
+    } catch (redisError) {
+      console.error('❌ Redis unavailable:', redisError.message);
+      await sendMessage(chatId, 
+        '⚠️ Service temporarily unavailable. Please try again in a few minutes.\n\n' +
+        'Use /start to return to main menu.'
+      );
+      return res.status(200).json({ ok: true });
+    }
     
     if (session) {
       debugLog(`Session found: step ${session.step}`);
@@ -1252,13 +1279,14 @@ Need to go back to the main menu? Just type /start`;
       }
       
       const currentStep = session.step;
+      const questionConfig = questions[currentStep];
       
-      // Валидация для обязательных вопросов
-      if (currentStep <= 1 && answer !== 'Not specified') {
-        const validation = validateUserInput(currentStep, answer);
+      // Валидация с использованием универсальной функции
+      if (questionConfig.required && answer !== 'Not specified') {
+        const validation = validateUserInput(questionConfig, answer);
         
         if (!validation.valid) {
-          await sendMessage(chatId, `❌ ${validation.error}.\n\nPlease try again:\n\n${questions[currentStep]}`, {
+          await sendMessage(chatId, `❌ ${validation.error}.\n\nPlease try again:\n\n${questionConfig.text}`, {
             reply_markup: { remove_keyboard: true }
           });
           return res.status(200).json({ ok: true });
@@ -1273,9 +1301,19 @@ Need to go back to the main menu? Just type /start`;
       if (session.step >= questions.length) {
         await processCompletedSurvey(chatId, userId, session.answers);
       } else {
-        await saveSession(userId, session.step, session.answers);
+        try {
+          await saveSession(userId, session.step, session.answers);
+        } catch (redisError) {
+          console.error('❌ Failed to save session progress:', redisError.message);
+          await sendMessage(chatId, 
+            '⚠️ Unable to save progress. Please restart the survey with /start'
+          );
+          return res.status(200).json({ ok: true });
+        }
         
-        const isSkippable = session.step >= 2;
+        const nextQuestion = questions[session.step];
+        const isSkippable = !nextQuestion.required;
+        
         const replyMarkup = isSkippable ? {
           keyboard: [[{ text: 'Skip this question ⏭️' }]],
           resize_keyboard: true
@@ -1283,7 +1321,7 @@ Need to go back to the main menu? Just type /start`;
           remove_keyboard: true
         };
         
-        await sendMessage(chatId, questions[session.step], { reply_markup: replyMarkup });
+        await sendMessage(chatId, nextQuestion.text, { reply_markup: replyMarkup });
       }
     } else {
       await sendMessage(chatId, 'Hi! 👋 Use /start to see the main menu and available options.');
