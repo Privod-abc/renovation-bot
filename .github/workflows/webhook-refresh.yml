@@ -1,0 +1,18 @@
+name: Refresh Telegram Webhook
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'  # каждые 20 минут
+  workflow_dispatch:  # возможность запуска вручную
+
+jobs:
+  refresh-webhook:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping webhook endpoint
+        run: |
+          curl -f -s https://renovation-bot-six.vercel.app/api/webhook || echo "Webhook ping failed"
+        continue-on-error: true
+      
+      - name: Log completion
+        run: echo "Webhook refresh attempt completed at $(date)"
