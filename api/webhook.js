@@ -10,10 +10,11 @@ import https from 'https';
 // Настройки для продакшна
 const DEBUG_MODE = process.env.NODE_ENV === 'development';
 const REQUEST_TIMEOUT = 8000;
-const HEALTH_CHECK_INTERVAL = 10 * 60 * 1000; // 10 минут - ИСПРАВЛЕНО
+const HEALTH_CHECK_INTERVAL = 2 * 60 * 1000; // ТЕСТИРОВАНИЕ: 2 минуты для быстрого теста
 const MAX_CONSECUTIVE_ERRORS = 5; // ИСПРАВЛЕНО: больше терпимости
-const MAX_PENDING_COUNT = 20; // НОВОЕ: реалистичный порог
-const RECENT_ERROR_THRESHOLD = 10 * 60; // НОВОЕ: 10 минут для ошибок
+const MAX_PENDING_COUNT = 100; // ВРЕМЕННО: очень высокий порог
+const RECENT_ERROR_THRESHOLD = 30 * 60; // НОВОЕ: 30 минут для ошибок
+const ENABLE_AUTO_HEALING = true; // Включаем но с осторожными настройками
 
 // Настройки уведомлений
 const NOTIFICATION_SETTINGS = {
@@ -200,6 +201,12 @@ function canSendNotification(type) {
 
 // Автоматическая самодиагностика webhook
 async function selfHealingCheck() {
+  // ВРЕМЕННАЯ ЗАЩИТА: отключаем автовосстановление
+  if (!ENABLE_AUTO_HEALING) {
+    debugLog('🔒 Auto-healing disabled, skipping check');
+    return true;
+  }
+
   const now = Date.now();
   
   // Предотвращаем множественные запуски
@@ -222,11 +229,15 @@ async function selfHealingCheck() {
     
     // ИСПРАВЛЕНО: Используем переменные окружения вместо захардкоженного URL
     const vercelUrl = process.env.VERCEL_URL;
+    console.log(`🔍 VERCEL_URL from env: "${vercelUrl}"`);
+    
     if (!vercelUrl) {
-      throw new Error('VERCEL_URL environment variable not set');
+      console.error('❌ VERCEL_URL not set, skipping healing check');
+      return true; // Не пытаемся чинить без URL
     }
     
     const expectedUrl = `https://${vercelUrl}/api/webhook`;
+    console.log(`🔍 Constructed expected URL: "${expectedUrl}" (length: ${expectedUrl.length})`);
     
     const webhookInfo = await getWebhookInfo(botToken);
     if (!webhookInfo.ok) throw new Error('Failed to get webhook info');
@@ -239,14 +250,24 @@ async function selfHealingCheck() {
     const hasRecentErrors = lastErrorDate > 0 && 
                            (now/1000 - lastErrorDate) < RECENT_ERROR_THRESHOLD;
     
-    debugLog(`Webhook status: URL match=${currentUrl === expectedUrl}, Pending=${pendingCount}, Recent errors=${hasRecentErrors}`);
+    console.log(`🔍 Webhook diagnosis: Current="${currentUrl}", Expected="${expectedUrl}", Match=${currentUrl === expectedUrl}, Pending=${pendingCount}, Errors=${hasRecentErrors}`);
     
-    // ИСПРАВЛЕННЫЕ УСЛОВИЯ ДЛЯ HEALING
+    // ИСПРАВЛЕННЫЕ УСЛОВИЯ ДЛЯ HEALING - только критические случаи
     const needsHealing = (
-      currentUrl !== expectedUrl ||                    // URL не совпадает
-      pendingCount > MAX_PENDING_COUNT ||              // ИСПРАВЛЕНО: увеличен порог до 20
-      (hasRecentErrors && consecutiveErrors > 2)       // ИСПРАВЛЕНО: более умная логика
+      // Только если URL совсем не совпадает
+      currentUrl !== expectedUrl &&
+      // И это не просто обрезанная версия того же URL
+      !currentUrl.startsWith(expectedUrl.substring(0, 30))  // Проверяем первые 30 символов
     );
+    
+    console.log(`🔍 Healing analysis: 
+      Current: "${currentUrl}"
+      Expected: "${expectedUrl}"  
+      URLs match: ${currentUrl === expectedUrl}
+      URL prefix match: ${currentUrl?.startsWith(expectedUrl.substring(0, 30))}
+      Pending: ${pendingCount}/${MAX_PENDING_COUNT}
+      Recent errors: ${hasRecentErrors}
+      Needs healing: ${needsHealing}`);
     
     if (needsHealing) {
       console.log(`🚨 Bot needs healing - URL match: ${currentUrl === expectedUrl}, Pending: ${pendingCount}, Errors: ${hasRecentErrors}`);
@@ -302,7 +323,7 @@ async function selfHealingCheck() {
   }
 }
 
-// Получение информации о webhook
+// Получение информации о webhook с детальным логгированием
 function getWebhookInfo(botToken) {
   return new Promise((resolve, reject) => {
     const options = {
@@ -317,14 +338,21 @@ function getWebhookInfo(botToken) {
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
         try {
-          resolve(JSON.parse(data));
+          const result = JSON.parse(data);
+          console.log(`📥 getWebhookInfo response:`, JSON.stringify(result, null, 2));
+          resolve(result);
         } catch (error) {
+          console.error('❌ Failed to parse getWebhookInfo response:', data);
           reject(error);
         }
       });
     });
     
-    req.on('error', reject);
+    req.on('error', (error) => {
+      console.error('❌ getWebhookInfo request error:', error);
+      reject(error);
+    });
+    
     req.setTimeout(REQUEST_TIMEOUT, () => {
       req.destroy();
       reject(new Error('Webhook info timeout'));
@@ -334,10 +362,10 @@ function getWebhookInfo(botToken) {
   });
 }
 
-// Восстановление webhook
+// Восстановление webhook с детальным логгированием
 async function healWebhook(botToken, url) {
   try {
-    debugLog('🔧 Healing webhook');
+    console.log(`🔧 Healing webhook with URL: "${url}" (length: ${url.length})`);
     
     await deleteWebhook(botToken);
     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -345,9 +373,10 @@ async function healWebhook(botToken, url) {
     const setResult = await setWebhookHTTPS(botToken, url);
     
     if (setResult.ok) {
-      debugLog('✅ Webhook healed successfully');
+      console.log(`✅ Webhook healed successfully with URL: "${url}"`);
       return { success: true };
     } else {
+      console.error(`❌ Webhook healing failed. Response:`, setResult);
       throw new Error(setResult.description || 'Unknown error');
     }
     
@@ -397,11 +426,16 @@ function deleteWebhook(botToken) {
 
 function setWebhookHTTPS(botToken, url) {
   return new Promise((resolve, reject) => {
-    const postData = JSON.stringify({
+    const payload = {
       url: url,
       allowed_updates: ["message", "callback_query"],
       drop_pending_updates: true
-    });
+    };
+    
+    console.log(`🔧 Setting webhook with payload:`, JSON.stringify(payload, null, 2));
+    
+    const postData = JSON.stringify(payload);
+    console.log(`📤 POST data: "${postData}" (length: ${postData.length})`);
     
     const options = {
       hostname: 'api.telegram.org',
@@ -419,14 +453,21 @@ function setWebhookHTTPS(botToken, url) {
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
         try {
-          resolve(JSON.parse(data));
+          const result = JSON.parse(data);
+          console.log(`📥 Telegram API response:`, JSON.stringify(result, null, 2));
+          resolve(result);
         } catch (error) {
+          console.error('❌ Failed to parse Telegram API response:', data);
           reject(error);
         }
       });
     });
     
-    req.on('error', reject);
+    req.on('error', (error) => {
+      console.error('❌ Request error:', error);
+      reject(error);
+    });
+    
     req.setTimeout(REQUEST_TIMEOUT, () => {
       req.destroy();
       reject(new Error('Set webhook timeout'));
@@ -999,6 +1040,8 @@ async function setupBotCommands() {
         { command: 'survey', description: '🚀 Start project survey' },
         { command: 'help', description: '❓ Show help information' },
         { command: 'status', description: '📊 Check bot status' },
+        { command: 'heal', description: '🔧 Test webhook healing' },
+        { command: 'checkhealth', description: '🔍 Force health check' }, 
         { command: 'cancel', description: '❌ Cancel current survey' }
       ]
     });
@@ -1282,6 +1325,28 @@ const commandHandlers = {
       console.error('❌ Status command error:', error.message);
       await sendMessage(chatId, `❌ Status check failed: ${error.message}`);
     }
+  },
+
+  // НОВОЕ: Команда для принудительной проверки
+  '/checkhealth': async (chatId, userId) => {
+    try {
+      await sendMessage(chatId, '🔍 Running immediate health check...');
+      
+      // Сброс интервала для немедленной проверки
+      lastHealthCheck = 0;
+      
+      const result = await selfHealingCheck();
+      
+      if (result) {
+        await sendMessage(chatId, '✅ Health check completed successfully!');
+      } else {
+        await sendMessage(chatId, '❌ Health check found issues. Check logs.');
+      }
+      
+    } catch (error) {
+      console.error('❌ CheckHealth command error:', error.message);
+      await sendMessage(chatId, `❌ Health check failed: ${error.message}`);
+    }
   }
 };
 
@@ -1306,10 +1371,12 @@ export default async function handler(req, res) {
       consecutiveErrors: consecutiveErrors,
       webhookUrl: webhookUrl,
       healingInProgress: isHealingInProgress,
+      autoHealingEnabled: ENABLE_AUTO_HEALING,
       config: {
         healthCheckInterval: HEALTH_CHECK_INTERVAL / 1000 / 60 + ' minutes',
         maxPendingCount: MAX_PENDING_COUNT,
-        maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS
+        maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS,
+        autoHealing: ENABLE_AUTO_HEALING ? 'enabled' : 'DISABLED'
       }
     });
   }
