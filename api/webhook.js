@@ -7,33 +7,17 @@ import https from 'https';
 // КОНФИГУРАЦИЯ И КОНСТАНТЫ
 // ============================================================================
 
-// Настройки для продакшна
 const DEBUG_MODE = process.env.NODE_ENV === 'development';
 const REQUEST_TIMEOUT = 8000;
-const HEALTH_CHECK_INTERVAL = 2 * 60 * 1000; // ТЕСТИРОВАНИЕ: 2 минуты для быстрого теста
-const MAX_CONSECUTIVE_ERRORS = 5; // ИСПРАВЛЕНО: больше терпимости
-const MAX_PENDING_COUNT = 100; // ВРЕМЕННО: очень высокий порог
-const RECENT_ERROR_THRESHOLD = 30 * 60; // НОВОЕ: 30 минут для ошибок
-const ENABLE_AUTO_HEALING = true; // Включаем но с осторожными настройками
 
-// Настройки уведомлений
-const NOTIFICATION_SETTINGS = {
-  NOTIFY_RECOVERY: true,
-  NOTIFY_CRITICAL: true,
-  MIN_NOTIFICATION_INTERVAL: 30 * 60 * 1000,
-  QUIET_HOURS: { enabled: false, start: 23, end: 7 }
-};
+// Система периодического обновления webhook
+const WEBHOOK_REFRESH_INTERVAL = 20 * 60 * 1000; // 20 минут
+let lastWebhookRefresh = 0;
 
 // Константы валидации
 const MAX_CLIENT_NAME_LENGTH = 50;
 const MAX_ROOM_TYPE_LENGTH = 30;
 const REDIS_SESSION_TTL = 3600;
-
-// Переменные состояния системы восстановления
-let lastHealthCheck = 0;
-let consecutiveErrors = 0;
-let lastNotifications = { recovery: 0, critical: 0 };
-let isHealingInProgress = false; // НОВОЕ: предотвращает race conditions
 
 // Текстовые константы
 const HELP_TEXT = `*❓ Renovation Project Bot Help*
@@ -144,21 +128,18 @@ const COLUMN_HEADERS = [
 // УТИЛИТЫ И ЛОГИРОВАНИЕ
 // ============================================================================
 
-// Безопасное debug логирование
 function debugLog(message, ...args) {
   if (DEBUG_MODE) {
     console.log(message, ...args);
   }
 }
 
-// Безопасное логирование сообщений пользователей
 function logUserMessage(userId, text, type = 'message') {
   const maskedUserId = '***' + userId.toString().slice(-4);
   const sanitizedText = text ? text.substring(0, 50).replace(/[^\w\s\-]/g, '') : 'empty';
   console.log(`${type} from user [${maskedUserId}]: [${sanitizedText}...]`);
 }
 
-// Безопасное логирование обновлений
 function logUpdate(update) {
   if (DEBUG_MODE) {
     console.log('Update received:', {
@@ -172,223 +153,44 @@ function logUpdate(update) {
 }
 
 // ============================================================================
-// СИСТЕМА АВТОМАТИЧЕСКОГО ВОССТАНОВЛЕНИЯ WEBHOOK
+// СИСТЕМА ОБНОВЛЕНИЯ WEBHOOK
 // ============================================================================
 
-// Проверка возможности отправки уведомления
-function canSendNotification(type) {
-  const now = Date.now();
-  const lastSent = lastNotifications[type] || 0;
-  
-  if (now - lastSent < NOTIFICATION_SETTINGS.MIN_NOTIFICATION_INTERVAL) {
-    return false;
-  }
-  
-  if (NOTIFICATION_SETTINGS.QUIET_HOURS.enabled) {
-    const currentHour = new Date().getHours();
-    const start = NOTIFICATION_SETTINGS.QUIET_HOURS.start;
-    const end = NOTIFICATION_SETTINGS.QUIET_HOURS.end;
-    
-    if (start > end) {
-      if (currentHour >= start || currentHour < end) return false;
-    } else {
-      if (currentHour >= start && currentHour < end) return false;
-    }
-  }
-  
-  return true;
-}
-
-// Автоматическая самодиагностика webhook
-async function selfHealingCheck() {
-  // ВРЕМЕННАЯ ЗАЩИТА: отключаем автовосстановление
-  if (!ENABLE_AUTO_HEALING) {
-    debugLog('🔒 Auto-healing disabled, skipping check');
-    return true;
-  }
-
+async function refreshWebhookIfNeeded() {
   const now = Date.now();
   
-  // Предотвращаем множественные запуски
-  if (isHealingInProgress) {
-    debugLog('🔄 Healing already in progress, skipping');
-    return true;
+  if (now - lastWebhookRefresh < WEBHOOK_REFRESH_INTERVAL) {
+    return;
   }
   
-  if (now - lastHealthCheck < HEALTH_CHECK_INTERVAL) {
-    return true;
-  }
-  
-  lastHealthCheck = now;
-  isHealingInProgress = true; // БЛОКИРУЕМ конкурентные запуски
+  lastWebhookRefresh = now;
   
   try {
-    debugLog('🔍 Self-healing check started');
+    debugLog('🔄 Refreshing webhook...');
     
     const botToken = process.env.BOT_TOKEN;
+    const webhookUrl = 'https://renovation-bot-six.vercel.app/api/webhook';
     
-    // ИСПРАВЛЕНО: Используем переменные окружения вместо захардкоженного URL
-    const vercelUrl = process.env.VERCEL_URL;
-    console.log(`🔍 VERCEL_URL from env: "${vercelUrl}"`);
+    const result = await setWebhook(botToken, webhookUrl);
     
-    if (!vercelUrl) {
-      console.error('❌ VERCEL_URL not set, skipping healing check');
-      return true; // Не пытаемся чинить без URL
-    }
-    
-    const expectedUrl = `https://${vercelUrl}/api/webhook`;
-    console.log(`🔍 Constructed expected URL: "${expectedUrl}" (length: ${expectedUrl.length})`);
-    
-    const webhookInfo = await getWebhookInfo(botToken);
-    if (!webhookInfo.ok) throw new Error('Failed to get webhook info');
-    
-    const currentUrl = webhookInfo.result?.url;
-    const pendingCount = webhookInfo.result?.pending_update_count || 0;
-    const lastErrorDate = webhookInfo.result?.last_error_date || 0;
-    
-    // УЛУЧШЕННАЯ ЛОГИКА ПРОВЕРКИ ОШИБОК
-    const hasRecentErrors = lastErrorDate > 0 && 
-                           (now/1000 - lastErrorDate) < RECENT_ERROR_THRESHOLD;
-    
-    console.log(`🔍 Webhook diagnosis: Current="${currentUrl}", Expected="${expectedUrl}", Match=${currentUrl === expectedUrl}, Pending=${pendingCount}, Errors=${hasRecentErrors}`);
-    
-    // ИСПРАВЛЕННЫЕ УСЛОВИЯ ДЛЯ HEALING - только критические случаи
-    const needsHealing = (
-      // Только если URL совсем не совпадает
-      currentUrl !== expectedUrl &&
-      // И это не просто обрезанная версия того же URL
-      !currentUrl.startsWith(expectedUrl.substring(0, 30))  // Проверяем первые 30 символов
-    );
-    
-    console.log(`🔍 Healing analysis: 
-      Current: "${currentUrl}"
-      Expected: "${expectedUrl}"  
-      URLs match: ${currentUrl === expectedUrl}
-      URL prefix match: ${currentUrl?.startsWith(expectedUrl.substring(0, 30))}
-      Pending: ${pendingCount}/${MAX_PENDING_COUNT}
-      Recent errors: ${hasRecentErrors}
-      Needs healing: ${needsHealing}`);
-    
-    if (needsHealing) {
-      console.log(`🚨 Bot needs healing - URL match: ${currentUrl === expectedUrl}, Pending: ${pendingCount}, Errors: ${hasRecentErrors}`);
-      
-      const healResult = await healWebhook(botToken, expectedUrl);
-      
-      if (healResult.success) {
-        consecutiveErrors = 0;
-        console.log('✅ Bot self-healed successfully');
-        
-        await notifyAdminSafe('recovery', {
-          previousUrl: currentUrl,
-          pendingCount: pendingCount,
-          healedAt: new Date().toLocaleString(),
-          reason: currentUrl !== expectedUrl ? 'URL mismatch' : 
-                  pendingCount > MAX_PENDING_COUNT ? 'High pending count' : 'Recent errors'
-        });
-        
-        return true;
-      } else {
-        consecutiveErrors++;
-        console.error(`❌ Self-healing failed (attempt ${consecutiveErrors})`);
-        
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          await notifyAdminSafe('critical', {
-            consecutiveErrors,
-            lastError: healResult.error,
-            currentUrl,
-            pendingCount
-          });
-        }
-        return false;
-      }
+    if (result.ok) {
+      debugLog('✅ Webhook refreshed successfully');
     } else {
-      consecutiveErrors = 0;
-      debugLog('✅ Bot is healthy');
-      return true;
+      console.error('❌ Webhook refresh failed:', result.description);
     }
     
   } catch (error) {
-    consecutiveErrors++;
-    console.error('❌ Self-healing check error:', error.message);
-    
-    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-      await notifyAdminSafe('critical', {
-        consecutiveErrors,
-        lastError: error.message
-      });
-    }
-    return false;
-  } finally {
-    isHealingInProgress = false; // ВСЕГДА разблокируем
+    console.error('❌ Webhook refresh error:', error.message);
   }
 }
 
-// Получение информации о webhook с детальным логгированием
-function getWebhookInfo(botToken) {
+function setWebhook(botToken, url) {
   return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.telegram.org',
-      port: 443,
-      path: `/bot${botToken}/getWebhookInfo`,
-      method: 'GET'
-    };
-    
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          const result = JSON.parse(data);
-          console.log(`📥 getWebhookInfo response:`, JSON.stringify(result, null, 2));
-          resolve(result);
-        } catch (error) {
-          console.error('❌ Failed to parse getWebhookInfo response:', data);
-          reject(error);
-        }
-      });
+    const postData = JSON.stringify({
+      url: url,
+      allowed_updates: ["message", "callback_query"],
+      drop_pending_updates: false
     });
-    
-    req.on('error', (error) => {
-      console.error('❌ getWebhookInfo request error:', error);
-      reject(error);
-    });
-    
-    req.setTimeout(REQUEST_TIMEOUT, () => {
-      req.destroy();
-      reject(new Error('Webhook info timeout'));
-    });
-    
-    req.end();
-  });
-}
-
-// Восстановление webhook с детальным логгированием
-async function healWebhook(botToken, url) {
-  try {
-    console.log(`🔧 Healing webhook with URL: "${url}" (length: ${url.length})`);
-    
-    await deleteWebhook(botToken);
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    const setResult = await setWebhookHTTPS(botToken, url);
-    
-    if (setResult.ok) {
-      console.log(`✅ Webhook healed successfully with URL: "${url}"`);
-      return { success: true };
-    } else {
-      console.error(`❌ Webhook healing failed. Response:`, setResult);
-      throw new Error(setResult.description || 'Unknown error');
-    }
-    
-  } catch (error) {
-    console.error('❌ Webhook healing failed:', error.message);
-    return { success: false, error: error.message };
-  }
-}
-
-function deleteWebhook(botToken) {
-  return new Promise((resolve) => {
-    const postData = JSON.stringify({ url: '' });
     
     const options = {
       hostname: 'api.telegram.org',
@@ -408,66 +210,12 @@ function deleteWebhook(botToken) {
         try {
           resolve(JSON.parse(data));
         } catch (error) {
-          resolve({ ok: true });
-        }
-      });
-    });
-    
-    req.on('error', () => resolve({ ok: true }));
-    req.setTimeout(5000, () => {
-      req.destroy();
-      resolve({ ok: true });
-    });
-    
-    req.write(postData);
-    req.end();
-  });
-}
-
-function setWebhookHTTPS(botToken, url) {
-  return new Promise((resolve, reject) => {
-    const payload = {
-      url: url,
-      allowed_updates: ["message", "callback_query"],
-      drop_pending_updates: true
-    };
-    
-    console.log(`🔧 Setting webhook with payload:`, JSON.stringify(payload, null, 2));
-    
-    const postData = JSON.stringify(payload);
-    console.log(`📤 POST data: "${postData}" (length: ${postData.length})`);
-    
-    const options = {
-      hostname: 'api.telegram.org',
-      port: 443,
-      path: `/bot${botToken}/setWebhook`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      }
-    };
-    
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          const result = JSON.parse(data);
-          console.log(`📥 Telegram API response:`, JSON.stringify(result, null, 2));
-          resolve(result);
-        } catch (error) {
-          console.error('❌ Failed to parse Telegram API response:', data);
           reject(error);
         }
       });
     });
     
-    req.on('error', (error) => {
-      console.error('❌ Request error:', error);
-      reject(error);
-    });
-    
+    req.on('error', reject);
     req.setTimeout(REQUEST_TIMEOUT, () => {
       req.destroy();
       reject(new Error('Set webhook timeout'));
@@ -478,72 +226,28 @@ function setWebhookHTTPS(botToken, url) {
   });
 }
 
-// Безопасные уведомления админа
-async function notifyAdminSafe(type, data) {
-  try {
-    const adminChatId = process.env.ADMIN_CHAT_ID;
-    if (!adminChatId) return;
-    
-    if (type === 'recovery' && !NOTIFICATION_SETTINGS.NOTIFY_RECOVERY) return;
-    if (type === 'critical' && !NOTIFICATION_SETTINGS.NOTIFY_CRITICAL) return;
-    
-    if (!canSendNotification(type)) {
-      debugLog(`Notification ${type} skipped (rate limited)`);
-      return;
-    }
-    
-    let message = '';
-    
-    if (type === 'recovery') {
-      message = `🤖 Bot Auto-Recovery!\n\n` +
-                `✅ Automatically fixed\n` +
-                `Previous URL: ${data.previousUrl?.substring(0, 40)}...\n` +
-                `Pending: ${data.pendingCount}\n` +
-                `Time: ${data.healedAt}`;
-                
-    } else if (type === 'critical') {
-      message = `🚨 Bot Critical Issue!\n\n` +
-                `❌ ${data.consecutiveErrors} healing failures\n` +
-                `Time: ${new Date().toLocaleString()}\n\n` +
-                `Check: https://${process.env.VERCEL_URL}/api/webhook`;
-    }
-    
-    if (message) {
-      await sendMessage(adminChatId, message);
-      lastNotifications[type] = Date.now();
-      debugLog(`Admin notification sent: ${type}`);
-    }
-    
-  } catch (error) {
-    console.error('❌ Admin notification failed:', error.message);
-  }
-}
-
 // ============================================================================
 // ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ
 // ============================================================================
 
-// Инициализация Redis
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// Авторизованные пользователи
 const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ? 
   process.env.AUTHORIZED_USERS.split(',').map(id => parseInt(id.trim())) : 
   [];
 
 debugLog('Authorized users loaded:', AUTHORIZED_USERS.length);
 
-// Функция проверки авторизации
 function isUserAuthorized(userId) {
   if (AUTHORIZED_USERS.length === 0) return true;
   return AUTHORIZED_USERS.includes(userId);
 }
 
 // ============================================================================
-// REDIS ФУНКЦИИ (С УЛУЧШЕННОЙ ОБРАБОТКОЙ ОШИБОК)
+// REDIS ФУНКЦИИ
 // ============================================================================
 
 async function getSession(userId) {
@@ -553,7 +257,7 @@ async function getSession(userId) {
     return session;
   } catch (error) {
     console.error('❌ Redis get session error:', error.message);
-    throw error; // Пробрасываем ошибку выше для обработки
+    throw error;
   }
 }
 
@@ -565,7 +269,7 @@ async function saveSession(userId, step, answers) {
     return true;
   } catch (error) {
     console.error('❌ Redis save session error:', error.message);
-    throw error; // Пробрасываем ошибку выше для обработки
+    throw error;
   }
 }
 
@@ -576,7 +280,6 @@ async function deleteSession(userId) {
     return true;
   } catch (error) {
     console.error('❌ Redis delete session error:', error.message);
-    // Для удаления сессии не критично если не удалось
     return false;
   }
 }
@@ -585,7 +288,6 @@ async function deleteSession(userId) {
 // ВАЛИДАЦИЯ И ОБРАБОТКА ДАННЫХ
 // ============================================================================
 
-// Универсальная функция валидации
 function validateUserInput(questionConfig, input) {
   const trimmedInput = input.trim();
   
@@ -606,7 +308,6 @@ function validateUserInput(questionConfig, input) {
   return { valid: true, cleanInput: trimmedInput };
 }
 
-// Санитизация и валидация названий папок
 function sanitizeAndValidateFolderName(clientName, roomType) {
   const cleanClient = clientName.replace(/[<>:"/\\|?*]/g, '').trim().substring(0, MAX_CLIENT_NAME_LENGTH);
   const cleanRoom = roomType.replace(/[<>:"/\\|?*]/g, '').trim().substring(0, MAX_ROOM_TYPE_LENGTH);
@@ -617,7 +318,6 @@ function sanitizeAndValidateFolderName(clientName, roomType) {
   };
 }
 
-// Генерация содержимого файла проекта
 function generateProjectFileContent(answers, driveFolder) {
   const date = new Date().toLocaleDateString('en-US', {
     month: '2-digit', day: '2-digit', year: 'numeric'
@@ -661,10 +361,9 @@ FOLDER STRUCTURE
 }
 
 // ============================================================================
-// GOOGLE SERVICES (С УЛУЧШЕННОЙ ОБРАБОТКОЙ ОШИБОК)
+// GOOGLE SERVICES
 // ============================================================================
 
-// Создание файла в Google Drive
 async function createProjectFile(folderId, fileName, content, accessToken) {
   return new Promise((resolve, reject) => {
     debugLog(`Creating file: ${fileName}`);
@@ -729,7 +428,6 @@ async function createProjectFile(folderId, fileName, content, accessToken) {
   });
 }
 
-// Создание проектной папки с рефакторенным созданием подпапок
 async function createProjectFolder(clientName, roomType, location) {
   try {
     debugLog('Creating project folder');
@@ -769,8 +467,22 @@ async function createProjectFolder(clientName, roomType, location) {
     const mainFolder = await createDriveFolder(mainFolderData, token.token);
     debugLog(`Main folder created: ${mainFolder.id}`);
     
-    // РЕФАКТОРЕННОЕ создание подпапок с улучшенным логгированием
-    const createdSubfolders = await createSubfoldersAndPermissions(mainFolder.id, token.token);
+    const subfolders = ['Before', 'After', '3D Visualization', 'Floor Plans'];
+    const subfolderPromises = subfolders.map(name => 
+      createDriveFolder({
+        name,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [mainFolder.id]
+      }, token.token).catch(error => {
+        debugLog(`Error creating subfolder "${name}":`, error.message);
+        return null;
+      })
+    );
+    
+    const createdSubfolders = await Promise.all(subfolderPromises);
+    debugLog(`Created ${createdSubfolders.filter(Boolean).length} subfolders`);
+    
+    setFolderPermissions(mainFolder.id, token.token).catch(() => {});
     
     const folderUrl = `https://drive.google.com/drive/folders/${mainFolder.id}?usp=sharing`;
     
@@ -778,7 +490,7 @@ async function createProjectFolder(clientName, roomType, location) {
       folderId: mainFolder.id,
       folderName: folderName,
       folderUrl: folderUrl,
-      subfolders: createdSubfolders,
+      subfolders: createdSubfolders.filter(Boolean),
       token: token.token
     };
     
@@ -939,7 +651,6 @@ async function addRowToSheet(answers, driveFolder) {
 // TELEGRAM API
 // ============================================================================
 
-// Отправка сообщения
 function sendMessage(chatId, text, options = {}) {
   return new Promise((resolve, reject) => {
     const botToken = process.env.BOT_TOKEN;
@@ -1039,9 +750,6 @@ async function setupBotCommands() {
         { command: 'start', description: '🏠 Show main menu' },
         { command: 'survey', description: '🚀 Start project survey' },
         { command: 'help', description: '❓ Show help information' },
-        { command: 'status', description: '📊 Check bot status' },
-        { command: 'heal', description: '🔧 Test webhook healing' },
-        { command: 'checkhealth', description: '🔍 Force health check' }, 
         { command: 'cancel', description: '❌ Cancel current survey' }
       ]
     });
@@ -1082,7 +790,7 @@ async function showMainMenu(chatId) {
 }
 
 // ============================================================================
-// БИЗНЕС-ЛОГИКА (С УЛУЧШЕННОЙ ОБРАБОТКОЙ ОШИБОК И ПАРАЛЛЕЛИЗМОМ)
+// БИЗНЕС-ЛОГИКА
 // ============================================================================
 
 async function processCompletedSurvey(chatId, userId, answers) {
@@ -1091,19 +799,16 @@ async function processCompletedSurvey(chatId, userId, answers) {
     
     await sendMessage(chatId, "✅ Survey completed!\n\nCreating project folder...");
     
-    // 1. Создаем папку и проверяем критический результат
     const driveFolder = await createProjectFolder(
       answers[0] || 'Unknown Client',
       answers[1] || 'Unknown Room', 
       answers[2] || 'Unknown Location'
     );
     
-    // 2. КРИТИЧЕСКАЯ ПРОВЕРКА
     if (!driveFolder || !driveFolder.folderId) {
       throw new Error('Failed to create project folder - cannot continue');
     }
     
-    // 3. ПАРАЛЛЕЛЬНЫЕ ОПЕРАЦИИ с правильной обработкой ошибок
     const [fileResult, sheetResult] = await Promise.allSettled([
       createProjectFile(
         driveFolder.folderId, 
@@ -1114,19 +819,15 @@ async function processCompletedSurvey(chatId, userId, answers) {
       addRowToSheet(answers, driveFolder)
     ]);
     
-    // 4. Проверяем результаты операций
     if (fileResult.status === 'rejected') {
       console.error('❌ File creation failed:', fileResult.reason.message);
-      // Не критично - продолжаем
     }
     
     if (sheetResult.status === 'rejected') {
       console.error('❌ Sheets update failed:', sheetResult.reason.message);
-      // Это критическая ошибка - данные не сохранены
       throw sheetResult.reason;
     }
     
-    // 5. ПАРАЛЛЕЛЬНЫЕ УВЕДОМЛЕНИЯ
     const adminChatId = process.env.ADMIN_CHAT_ID;
     const notificationPromises = [];
     
@@ -1154,7 +855,6 @@ Use /start for main menu`;
       reply_markup: { remove_keyboard: true }
     }));
     
-    // 6. Отправляем уведомления параллельно
     await Promise.allSettled(notificationPromises);
     
     await deleteSession(userId);
@@ -1168,103 +868,7 @@ Use /start for main menu`;
 }
 
 // ============================================================================
-// HELPER FUNCTIONS (РЕФАКТОРИНГ)
-// ============================================================================
-
-// НОВОЕ: Создание подпапок с логгированием ошибок
-async function createSubfoldersAndPermissions(mainFolderId, accessToken) {
-  try {
-    const subfolders = ['Before', 'After', '3D Visualization', 'Floor Plans'];
-    debugLog(`Creating ${subfolders.length} subfolders`);
-    
-    const subfolderPromises = subfolders.map(async (name) => {
-      try {
-        const subfolder = await createDriveFolder({
-          name,
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: [mainFolderId]
-        }, accessToken);
-        
-        debugLog(`✅ Subfolder created: ${name} (${subfolder.id})`);
-        return subfolder;
-      } catch (error) {
-        console.error(`❌ Failed to create subfolder "${name}":`, error.message);
-        return null;
-      }
-    });
-    
-    const createdSubfolders = await Promise.allSettled(subfolderPromises);
-    
-    // Логгирование результатов
-    const successful = createdSubfolders.filter(result => 
-      result.status === 'fulfilled' && result.value !== null
-    ).length;
-    
-    const failed = createdSubfolders.length - successful;
-    
-    if (failed > 0) {
-      console.warn(`⚠️ ${failed} subfolders failed to create out of ${subfolders.length}`);
-    }
-    
-    debugLog(`Created ${successful}/${subfolders.length} subfolders successfully`);
-    
-    // Установка прав доступа (не критично если не удастся)
-    setFolderPermissions(mainFolderId, accessToken).catch((error) => {
-      console.warn('⚠️ Failed to set folder permissions:', error.message);
-    });
-    
-    return createdSubfolders
-      .filter(result => result.status === 'fulfilled' && result.value !== null)
-      .map(result => result.value);
-    
-  } catch (error) {
-    console.error('❌ Error in createSubfoldersAndPermissions:', error.message);
-    return [];
-  }
-}
-
-// НОВОЕ: Получение статуса бота
-async function getBotStatus() {
-  try {
-    const botToken = process.env.BOT_TOKEN;
-    const webhookInfo = await getWebhookInfo(botToken);
-    
-    const vercelUrl = process.env.VERCEL_URL;
-    const expectedUrl = vercelUrl ? `https://${vercelUrl}/api/webhook` : 'VERCEL_URL not set';
-    
-    const currentUrl = webhookInfo.result?.url || 'Not set';
-    const pendingCount = webhookInfo.result?.pending_update_count || 0;
-    const lastErrorDate = webhookInfo.result?.last_error_date || 0;
-    
-    const status = {
-      webhook: {
-        current: currentUrl,
-        expected: expectedUrl,
-        isCorrect: currentUrl === expectedUrl,
-        pending: pendingCount,
-        lastError: lastErrorDate > 0 ? new Date(lastErrorDate * 1000).toLocaleString() : 'None'
-      },
-      healing: {
-        lastCheck: new Date(lastHealthCheck).toLocaleString(),
-        consecutiveErrors: consecutiveErrors,
-        inProgress: isHealingInProgress
-      },
-      config: {
-        healthCheckInterval: `${HEALTH_CHECK_INTERVAL / 1000 / 60} minutes`,
-        maxPendingCount: MAX_PENDING_COUNT,
-        maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS
-      }
-    };
-    
-    return status;
-  } catch (error) {
-    console.error('❌ Error getting bot status:', error.message);
-    return { error: error.message };
-  }
-}
-
-// ============================================================================
-// COMMAND HANDLERS (DRY ПРИНЦИП)
+// COMMAND HANDLERS
 // ============================================================================
 
 const commandHandlers = {
@@ -1290,94 +894,6 @@ const commandHandlers = {
     await sendMessage(chatId, '❌ Survey cancelled.\n\nUse /start to return to the main menu.', {
       reply_markup: { remove_keyboard: true }
     });
-  },
-  
-  // НОВОЕ: Команда статуса
-  '/status': async (chatId, userId) => {
-    try {
-      const status = await getBotStatus();
-      
-      if (status.error) {
-        await sendMessage(chatId, `❌ Status check failed: ${status.error}`);
-        return;
-      }
-      
-      const message = `🤖 *Bot Status Report*
-
-*Webhook:*
-✅ Current: ${status.webhook.isCorrect ? 'Correct' : 'Incorrect'}
-📍 URL: ${status.webhook.current.substring(0, 50)}...
-📊 Pending: ${status.webhook.pending}
-🔄 Last Error: ${status.webhook.lastError}
-
-*Auto-Healing:*
-🕐 Last Check: ${status.healing.lastCheck}
-❌ Consecutive Errors: ${status.healing.consecutiveErrors}
-🔄 In Progress: ${status.healing.inProgress ? 'Yes' : 'No'}
-
-*Configuration:*
-⏱️ Check Interval: ${status.config.healthCheckInterval}
-📊 Max Pending: ${status.config.maxPendingCount}
-🔥 Max Errors: ${status.config.maxConsecutiveErrors}`;
-
-      await sendMessage(chatId, message);
-    } catch (error) {
-      console.error('❌ Status command error:', error.message);
-      await sendMessage(chatId, `❌ Status check failed: ${error.message}`);
-    }
-  },
-
-  // НОВОЕ: Команда для тестирования healing
-  '/heal': async (chatId, userId) => {
-    try {
-      await sendMessage(chatId, '🔧 Starting manual healing test...');
-      
-      const botToken = process.env.BOT_TOKEN;
-      const vercelUrl = process.env.VERCEL_URL;
-      
-      if (!vercelUrl) {
-        await sendMessage(chatId, '❌ VERCEL_URL not set');
-        return;
-      }
-      
-      const expectedUrl = `https://${vercelUrl}/api/webhook`;
-      
-      await sendMessage(chatId, `🔍 Testing URL: ${expectedUrl}`);
-      
-      const result = await healWebhook(botToken, expectedUrl);
-      
-      if (result.success) {
-        await sendMessage(chatId, '✅ Manual healing successful!');
-      } else {
-        await sendMessage(chatId, `❌ Manual healing failed: ${result.error}`);
-      }
-      
-    } catch (error) {
-      console.error('❌ Heal command error:', error.message);
-      await sendMessage(chatId, `❌ Heal command failed: ${error.message}`);
-    }
-  },
-
-  // НОВОЕ: Команда для принудительной проверки
-  '/checkhealth': async (chatId, userId) => {
-    try {
-      await sendMessage(chatId, '🔍 Running immediate health check...');
-      
-      // Сброс интервала для немедленной проверки
-      lastHealthCheck = 0;
-      
-      const result = await selfHealingCheck();
-      
-      if (result) {
-        await sendMessage(chatId, '✅ Health check completed successfully!');
-      } else {
-        await sendMessage(chatId, '❌ Health check found issues. Check logs.');
-      }
-      
-    } catch (error) {
-      console.error('❌ CheckHealth command error:', error.message);
-      await sendMessage(chatId, `❌ Health check failed: ${error.message}`);
-    }
   }
 };
 
@@ -1388,27 +904,15 @@ const commandHandlers = {
 export default async function handler(req, res) {
   console.log(`${new Date().toISOString()} - ${req.method} request received`);
   
-  // Автоматическая самодиагностика webhook (НЕ keepalive!)
-  selfHealingCheck().catch(() => {});
+  // Периодическое обновление webhook (неблокирующее)
+  refreshWebhookIfNeeded().catch(() => {});
   
   if (req.method === 'GET') {
-    const webhookUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}/api/webhook` : 'VERCEL_URL not set';
-    
     return res.status(200).json({ 
       message: 'Renovation Bot - Production Ready',
       status: 'active',
       timestamp: new Date().toISOString(),
-      lastHealthCheck: new Date(lastHealthCheck).toISOString(),
-      consecutiveErrors: consecutiveErrors,
-      webhookUrl: webhookUrl,
-      healingInProgress: isHealingInProgress,
-      autoHealingEnabled: ENABLE_AUTO_HEALING,
-      config: {
-        healthCheckInterval: HEALTH_CHECK_INTERVAL / 1000 / 60 + ' minutes',
-        maxPendingCount: MAX_PENDING_COUNT,
-        maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS,
-        autoHealing: ENABLE_AUTO_HEALING ? 'enabled' : 'DISABLED'
-      }
+      lastWebhookRefresh: new Date(lastWebhookRefresh).toISOString()
     });
   }
 
@@ -1420,7 +924,6 @@ export default async function handler(req, res) {
     const update = req.body;
     logUpdate(update);
     
-    // Обработка callback queries
     if (update.callback_query) {
       const { message, from, data, id } = update.callback_query;
       const chatId = message.chat.id;
@@ -1491,14 +994,12 @@ Use /start anytime to return to the main menu.`);
       return res.status(200).json({ ok: true });
     }
     
-    // Обработка команд через handlers (DRY принцип)
     const handler = commandHandlers[text];
     if (handler) {
       await handler(chatId, userId);
       return res.status(200).json({ ok: true });
     }
     
-    // Обработка ответов на вопросы анкеты
     let session;
     try {
       session = await getSession(userId);
@@ -1531,7 +1032,6 @@ Use /start anytime to return to the main menu.`);
       const currentStep = session.step;
       const questionConfig = questions[currentStep];
       
-      // Валидация с использованием универсальной функции
       if (questionConfig.required && answer !== 'Not specified') {
         const validation = validateUserInput(questionConfig, answer);
         
