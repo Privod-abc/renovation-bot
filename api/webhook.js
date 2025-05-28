@@ -1327,6 +1327,37 @@ const commandHandlers = {
     }
   },
 
+  // НОВОЕ: Команда для тестирования healing
+  '/heal': async (chatId, userId) => {
+    try {
+      await sendMessage(chatId, '🔧 Starting manual healing test...');
+      
+      const botToken = process.env.BOT_TOKEN;
+      const vercelUrl = process.env.VERCEL_URL;
+      
+      if (!vercelUrl) {
+        await sendMessage(chatId, '❌ VERCEL_URL not set');
+        return;
+      }
+      
+      const expectedUrl = `https://${vercelUrl}/api/webhook`;
+      
+      await sendMessage(chatId, `🔍 Testing URL: ${expectedUrl}`);
+      
+      const result = await healWebhook(botToken, expectedUrl);
+      
+      if (result.success) {
+        await sendMessage(chatId, '✅ Manual healing successful!');
+      } else {
+        await sendMessage(chatId, `❌ Manual healing failed: ${result.error}`);
+      }
+      
+    } catch (error) {
+      console.error('❌ Heal command error:', error.message);
+      await sendMessage(chatId, `❌ Heal command failed: ${error.message}`);
+    }
+  },
+
   // НОВОЕ: Команда для принудительной проверки
   '/checkhealth': async (chatId, userId) => {
     try {
