@@ -1146,50 +1146,6 @@ const commandHandlers = {
 // ОСНОВНОЙ HANDLER
 // ============================================================================
 
-
-// ==================== ОБНОВЛЕННАЯ ЛОГИКА ДЛЯ ПОЛНОГО ОПРОСА ====================
-
-const SURVEY_QUESTIONS = [
-  "🙋‍♂️ What's the client's name?",
-  "🏗️ What room was remodeled?",
-  "📍 Project location (city/state)?",
-  "🌟 Client's goal?",
-  "💪 Work done?",
-  "🧱 Materials used?",
-  "✨ Notable features?"
-];
-
-async function handleSurveyMessage(userId, chatId, text) {
-  const key = `survey_${userId}`;
-  const session = await redis.get(key) || { step: 0, answers: [] };
-
-  if (text === '/cancel') {
-    await redis.del(key);
-    return await sendMessage(chatId, '❌ Survey canceled.');
-  }
-
-  if (text === '/submit') {
-    if (!session.answers || session.answers.length < 2) {
-      return await sendMessage(chatId, '⚠️ Please complete at least the first 2 questions before submitting.');
-    }
-    await storeToGoogleSheet(session.answers);
-    await redis.del(key);
-    return await sendMessage(chatId, '✅ Survey submitted and saved successfully.');
-  }
-
-  session.answers[session.step] = text;
-  session.step++;
-
-  await redis.set(key, session, { ex: REDIS_SESSION_TTL });
-
-  if (session.step >= SURVEY_QUESTIONS.length) {
-    return await sendMessage(chatId, '🎉 Survey complete! Type /submit to save or /cancel to discard.');
-  } else {
-    return await sendMessage(chatId, SURVEY_QUESTIONS[session.step]);
-  }
-}
-
-
 export default async function handler(req, res) {
   console.log(`${new Date().toISOString()} - ${req.method} request received`);
   
